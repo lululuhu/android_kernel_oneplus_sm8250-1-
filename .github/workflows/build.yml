@@ -47,6 +47,21 @@ jobs:
             git apply --3way --whitespace=nowarn "$p"
           done
 
+      - name: Fix KernelSU MODULE_IMPORT_NS
+        working-directory: kernel
+        run: |
+          KSU_FILES=$(grep -rl "MODULE_IMPORT_NS" drivers/kernelsu/ 2>/dev/null || true)
+          if [ -z "$KSU_FILES" ]; then
+            echo "no MODULE_IMPORT_NS found, skip"
+            exit 0
+          fi
+          for f in $KSU_FILES; do
+            if ! grep -q "MODULE_IMPORT_NS_COMPAT" "$f"; then
+              sed -i '1i #include <linux/module.h>\n#ifndef MODULE_IMPORT_NS\n#define MODULE_IMPORT_NS(x) do { } while (0)\n#define MODULE_IMPORT_NS_COMPAT 1\n#endif' "$f"
+            fi
+          done
+          echo "patched: $KSU_FILES"
+
       - name: Patch version strings
         working-directory: kernel
         env:

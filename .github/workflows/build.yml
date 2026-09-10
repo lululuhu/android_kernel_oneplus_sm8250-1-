@@ -90,7 +90,6 @@ jobs:
           echo CONFIG_BPF_UNPRIV_DEFAULT_OFF=y >> out/.config
           echo CONFIG_BPF_EVENTS=y >> out/.config
           echo CONFIG_BPF_LSM=y >> out/.config
-          echo CONFIG_BPF_PRELOAD=y >> out/.config
           echo CONFIG_HAVE_EBPF_JIT=y >> out/.config
           echo CONFIG_CGROUP_BPF=y >> out/.config
           echo CONFIG_NET_CLS_BPF=y >> out/.config
@@ -101,6 +100,10 @@ jobs:
           echo CONFIG_DEBUG_INFO_DWARF4=y >> out/.config
           echo CONFIG_FRAME_WARN=0 >> out/.config
           make O=out ARCH=arm64 CC=clang olddefconfig
+          touch kernel/bpf/preload/bpf_preload_umd
+          mkdir -p out/kernel/bpf/preload
+          touch out/kernel/bpf/preload/bpf_preload_umd
+          ls -la kernel/bpf/preload/bpf_preload_umd out/kernel/bpf/preload/bpf_preload_umd
 
       - name: Build kernel
         working-directory: kernel

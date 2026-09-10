@@ -1,0 +1,139 @@
+name: Build Oblivionis Kernel
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 360
+
+    steps:
+      - name: Free disk
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android
+          df -h
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+          path: kernel
+
+      - name: Install deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bc bison build-essential ccache curl flex g++-multilib gcc-multilib git gnupg gperf lib32ncurses5-dev lib32readline-dev lib32z1-dev liblz4-tool libncurses5 libncurses5-dev libsdl1.2-dev libssl-dev libxml2 libxml2-utils lzop pngcrush rsync schedtool squashfs-tools xsltproc zip zlib1g-dev python3 python3-pip imagemagick cpio device-tree-compiler libelf-dev dwarves
+
+      - name: Toolchains
+        run: |
+          mkdir -p ${{ github.workspace }}/toolchains
+          cd ${{ github.workspace }}/toolchains
+          git clone --depth=1 https://github.com/kdrag0n/proton-clang.git clang
+          git clone --depth=1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9.git gcc-arm64
+          git clone --depth=1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_arm_arm-linux-androideabi-4.9.git gcc-arm32
+
+      - name: Apply patches
+        working-directory: kernel
+        run: |
+          git config user.email ci@local
+          git config user.name CI
+          shopt -s nullglob
+          P=(../patches/*.patch)
+          if [ ${#P[@]} -eq 0 ]; then echo "no patches"; exit 0; fi
+          for p in "${P[@]}"; do
+            echo "applying $p"
+            git apply --3way --whitespace=nowarn "$p"
+          done
+
+      - name: Patch version
+        working-directory: kernel
+        env:
+          FAKE: 5.15.205
+          DISP: 4.19.325-Oblivionis
+        run: |
+          VER="${DISP%%-*}"
+          SUF="${DISP#*-}"
+          V="${VER%%.*}"
+          R="${VER#*.}"
+          P="${R%%.*}"
+          S="${R#*.}"
+          sed -i "s/^VERSION =.*/VERSION = $V/" Makefile
+          sed -i "s/^PATCHLEVEL =.*/PATCHLEVEL = $P/" Makefile
+          sed -i "s/^SUBLEVEL =.*/SUBLEVEL = $S/" Makefile
+          sed -i "s/^EXTRAVERSION =.*/EXTRAVERSION = -$SUF/" Makefile
+          sed -i "s/^NAME =.*/NAME = Oblivionis/" Makefile
+          FAKE="$FAKE" python3 -c "import pathlib,os;fake=os.environ['FAKE'];p=pathlib.Path('kernel/sys.c');s=p.read_text();needle='memcpy(&tmp, utsname(), sizeof(tmp));';rel='strncpy(tmp.release, \"'+fake+'\", sizeof(tmp.release)-1);';ver='strncpy(tmp.version, \"'+fake+'-Oblivionis\", sizeof(tmp.version)-1);';s=s.replace(needle,needle+' '+rel+' '+ver) if rel not in s else s;p.write_text(s);print('uname patched')"
+
+      - name: SukiSU
+        working-directory: kernel
+        continue-on-error: true
+        run: |
+          curl -LSs https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh | bash -s susfs-main || true
+
+      - name: Configure
+        working-directory: kernel
+        run: |
+          export ARCH=arm64
+          export PATH="${{ github.workspace }}/toolchains/clang/bin:$PATH"
+          mkdir -p out
+          make O=out ARCH=arm64 CC=clang vendor/kona-perf_defconfig
+          if [ -f arch/arm64/configs/vendor/oplus.config ]; then
+            ARCH=arm64 scripts/kconfig/merge_config.sh -m -O out out/.config arch/arm64/configs/vendor/oplus.config
+          fi
+          echo CONFIG_BPF=y >> out/.config
+          echo CONFIG_BPF_SYSCALL=y >> out/.config
+          echo CONFIG_BPF_JIT=y >> out/.config
+          echo CONFIG_BPF_JIT_ALWAYS_ON=y >> out/.config
+          echo CONFIG_BPF_JIT_DEFAULT_ON=y >> out/.config
+          echo CONFIG_BPF_UNPRIV_DEFAULT_OFF=y >> out/.config
+          echo CONFIG_BPF_EVENTS=y >> out/.config
+          echo CONFIG_BPF_LSM=y >> out/.config
+          echo CONFIG_BPF_PRELOAD=y >> out/.config
+          echo CONFIG_HAVE_EBPF_JIT=y >> out/.config
+          echo CONFIG_CGROUP_BPF=y >> out/.config
+          echo CONFIG_NET_CLS_BPF=y >> out/.config
+          echo CONFIG_NET_ACT_BPF=y >> out/.config
+          echo CONFIG_DEBUG_INFO=y >> out/.config
+          echo CONFIG_DEBUG_INFO_BTF=y >> out/.config
+          echo CONFIG_DEBUG_INFO_BTF_MODULES=y >> out/.config
+          echo CONFIG_DEBUG_INFO_DWARF4=y >> out/.config
+          echo CONFIG_FRAME_WARN=0 >> out/.config
+          make O=out ARCH=arm64 CC=clang olddefconfig
+
+      - name: Build
+        working-directory: kernel
+        run: |
+          export ARCH=arm64
+          export PATH="${{ github.workspace }}/toolchains/clang/bin:$PATH"
+          make -j$(nproc) O=out ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=${{ github.workspace }}/toolchains/gcc-arm64/bin/aarch64-linux-android- CROSS_COMPILE_ARM32=${{ github.workspace }}/toolchains/gcc-arm32/bin/arm-linux-androideabi- 2>&1 | tee build.log
+          test ${PIPESTATUS[0]} -eq 0
+
+      - name: AnyKernel3
+        run: |
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git ak3
+          sed -i 's/^device.name1=.*/device.name1=lemonades/' ak3/anykernel.sh
+          B=kernel/out/arch/arm64/boot
+          if [ -f "$B/Image.gz-dtb" ]; then cp "$B/Image.gz-dtb" ak3/
+          elif [ -f "$B/Image.gz" ]; then cp "$B/Image.gz" ak3/
+          else cp "$B/Image" ak3/; fi
+          cd ak3
+          ZIP="Oblivionis-4.19-lemonades-$(date +%Y%m%d-%H%M).zip"
+          zip -r9 "../$ZIP" . -x ".git/*"
+          echo "ZIP=$ZIP" >> $GITHUB_ENV
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: Oblivionis-${{ github.run_number }}
+          path: ${{ env.ZIP }}
+          retention-days: 30
+
+      - name: Upload log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: log-${{ github.run_number }}
+          path: kernel/build.log
+          retention-days: 7

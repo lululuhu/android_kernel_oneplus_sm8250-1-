@@ -44,19 +44,11 @@ jobs:
           if [ ${#P[@]} -eq 0 ]; then echo "no patches"; exit 0; fi
           for p in "${P[@]}"; do
             echo "applying $p"
-            git apply --3way --whitespace=nowarn "$p"
+            if ! git apply --3way --whitespace=nowarn "$p"; then
+              echo "::error::patch failed: $p"
+              exit 1
+            fi
           done
-
-      - name: Fix KernelSU MODULE_IMPORT_NS
-        working-directory: kernel
-        run: |
-          if [ ! -d drivers/kernelsu ]; then
-            echo "no kernelsu dir, skip"
-            exit 0
-          fi
-          find drivers/kernelsu -name '*.c' -exec sed -i '/^MODULE_IMPORT_NS(/d' {} +
-          echo "=== remaining MODULE_IMPORT_NS lines ==="
-          grep -rn "MODULE_IMPORT_NS" drivers/kernelsu/ || echo "none left"
 
       - name: Patch version strings
         working-directory: kernel
@@ -82,6 +74,24 @@ jobs:
         continue-on-error: true
         run: |
           curl -LSs https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh | bash -s susfs-main || true
+          if [ ! -d drivers/kernelsu ]; then
+            echo "kernelsu dir not found, trying fallback clone"
+            git clone --depth=1 https://github.com/tiann/KernelSU.git /tmp/ksu || true
+            if [ -d /tmp/ksu/kernel ]; then
+              cp -r /tmp/ksu/kernel drivers/kernelsu
+            fi
+          fi
+          echo "=== kernelsu dir check ==="
+          ls -la drivers/kernelsu/ 2>/dev/null || echo "still missing"
+
+      - name: Fix KernelSU MODULE_IMPORT_NS
+        working-directory: kernel
+        run: |
+          echo "=== before ==="
+          grep -rn "MODULE_IMPORT_NS" drivers/kernelsu/ 2>/dev/null || echo "not found"
+          find drivers/kernelsu -name '*.c' -print0 2>/dev/null | xargs -0 -r sed -i '/MODULE_IMPORT_NS(/d'
+          echo "=== after ==="
+          grep -rn "MODULE_IMPORT_NS" drivers/kernelsu/ 2>/dev/null || echo "all removed"
 
       - name: Configure kernel
         working-directory: kernel
@@ -93,43 +103,38 @@ jobs:
           if [ -f arch/arm64/configs/vendor/oplus.config ]; then
             ARCH=arm64 scripts/kconfig/merge_config.sh -m -O out out/.config arch/arm64/configs/vendor/oplus.config
           fi
-          echo CONFIG_BPF=y >> out/.config
-          echo CONFIG_BPF_SYSCALL=y >> out/.config
-          echo CONFIG_BPF_JIT=y >> out/.config
-          echo CONFIG_BPF_JIT_ALWAYS_ON=y >> out/.config
-          echo CONFIG_BPF_JIT_DEFAULT_ON=y >> out/.config
-          echo CONFIG_BPF_UNPRIV_DEFAULT_OFF=y >> out/.config
-          echo CONFIG_BPF_EVENTS=y >> out/.config
-          echo CONFIG_BPF_LSM=y >> out/.config
-          echo CONFIG_HAVE_EBPF_JIT=y >> out/.config
-          echo CONFIG_CGROUP_BPF=y >> out/.config
-          echo CONFIG_NET_CLS_BPF=y >> out/.config
-          echo CONFIG_NET_ACT_BPF=y >> out/.config
-          echo CONFIG_DEBUG_INFO=y >> out/.config
-          echo CONFIG_DEBUG_INFO_BTF=y >> out/.config
-          echo CONFIG_DEBUG_INFO_BTF_MODULES=y >> out/.config
-          echo CONFIG_DEBUG_INFO_DWARF4=y >> out/.config
-          echo CONFIG_FRAME_WARN=0 >> out/.config
           make O=out ARCH=arm64 CC=clang olddefconfig
-          touch kernel/bpf/preload/bpf_preload_umd
+          scripts/config --file out/.config -e BPF -e BPF_SYSCALL -e BPF_JIT -e BPF_JIT_ALWAYS_ON -e BPF_JIT_DEFAULT_ON -e BPF_UNPRIV_DEFAULT_OFF -e BPF_EVENTS -e BPF_LSM -e HAVE_EBPF_JIT -e CGROUP_BPF -e NET_CLS_BPF -e NET_ACT_BPF -e DEBUG_INFO -e DEBUG_INFO_DWARF4
+          scripts/config --file out/.config -d DEBUG_INFO_BTF_MODULES
+          scripts/config --file out/.config -d BPF_PRELOAD
+          scripts/config --file out/.config --set-val FRAME_WARN 0
+          make O=out ARCH=arm64 CC=clang olddefconfig
+          echo "=== config check ==="
+          grep -E "CONFIG_(BPF|BPF_SYSCALL|BPF_JIT|BPF_LSM|DEBUG_INFO_BTF|BPF_PRELOAD)=" out/.config || true
+          touch kernel/bpf/preload/bpf_preload_umd 2>/dev/null || true
           mkdir -p out/kernel/bpf/preload
-          touch out/kernel/bpf/preload/bpf_preload_umd
-          ls -la kernel/bpf/preload/bpf_preload_umd out/kernel/bpf/preload/bpf_preload_umd
+          touch out/kernel/bpf/preload/bpf_preload_umd 2>/dev/null || true
 
       - name: Build kernel
         working-directory: kernel
         run: |
           export ARCH=arm64
           export PATH="${{ github.workspace }}/toolchains/clang/bin:$PATH"
+          set -o pipefail
           make -j$(nproc) O=out ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=${{ github.workspace }}/toolchains/gcc-arm64/bin/aarch64-linux-android- CROSS_COMPILE_ARM32=${{ github.workspace }}/toolchains/gcc-arm32/bin/arm-linux-androideabi- 2>&1 | tee build.log
-          test ${PIPESTATUS[0]} -eq 0
 
       - name: Package with AnyKernel3
+        if: success()
         run: |
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git ak3
-          sed -i 's/^device.name1=.*/device.name1=lemonades/' ak3/anykernel.sh
-          sed -i 's/^device.name2=.*/device.name2=OnePlus 9R/' ak3/anykernel.sh
-          sed -i 's/^device.name3=.*/device.name3=OnePlus9R/' ak3/anykernel.sh
+          sed -i 's/^#\?device\.name1=.*/device.name1=lemonades/' ak3/anykernel.sh
+          sed -i 's/^#\?device\.name2=.*/device.name2=OnePlus 9R/' ak3/anykernel.sh
+          sed -i 's/^#\?device\.name3=.*/device.name3=OnePlus9R/' ak3/anykernel.sh
+          grep -q "^device.name1=" ak3/anykernel.sh || echo "device.name1=lemonades" >> ak3/anykernel.sh
+          grep -q "^device.name2=" ak3/anykernel.sh || echo "device.name2=OnePlus 9R" >> ak3/anykernel.sh
+          grep -q "^device.name3=" ak3/anykernel.sh || echo "device.name3=OnePlus9R" >> ak3/anykernel.sh
+          echo "=== device lines ==="
+          grep "^device.name" ak3/anykernel.sh
           B=kernel/out/arch/arm64/boot
           if [ -f "$B/Image.gz-dtb" ]; then cp "$B/Image.gz-dtb" ak3/
           elif [ -f "$B/Image.gz" ]; then cp "$B/Image.gz" ak3/
@@ -140,6 +145,7 @@ jobs:
           echo "ZIP=$ZIP" >> $GITHUB_ENV
 
       - name: Upload kernel zip
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: Oblivionis-${{ github.run_number }}

@@ -3,15 +3,26 @@ name: Build Oblivionis Kernel
 on:
   workflow_dispatch:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: ubuntu-22.04
     timeout-minutes: 360
-
+    env:
+      ARCH: arm64
+      TOOLCHAINS_DIR: ${{ github.workspace }}/toolchains
+      OUT_DIR: kernel/out
+      ZIP_PREFIX: Oblivionis
     steps:
       - name: Free disk
         run: |
-          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android || true
           df -h
 
       - name: Checkout kernel
@@ -21,15 +32,31 @@ jobs:
           submodules: recursive
           path: kernel
 
+      - name: Setup ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: ${{ runner.os }}-ccache-${{ github.ref }}-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-ccache-${{ github.ref }}-
+            ${{ runner.os }}-ccache-
+
       - name: Install deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y bc bison build-essential ccache curl flex g++-multilib gcc-multilib git gnupg gperf lib32ncurses5-dev lib32readline-dev lib32z1-dev liblz4-tool libncurses5 libncurses5-dev libsdl1.2-dev libssl-dev libxml2 libxml2-utils lzop pngcrush rsync schedtool squashfs-tools xsltproc zip zlib1g-dev python3 python3-pip imagemagick cpio device-tree-compiler libelf-dev dwarves
+          sudo apt-get install -y --no-install-recommends \
+            bc bison build-essential ccache curl flex g++-multilib gcc-multilib git gnupg gperf \
+            lib32ncurses5-dev lib32readline-dev lib32z1-dev liblz4-tool libncurses5 libncurses5-dev \
+            libsdl1.2-dev libssl-dev libxml2 libxml2-utils lzop pngcrush rsync schedtool \
+            squashfs-tools xsltproc zip unzip zlib1g-dev python3 python3-pip imagemagick \
+            cpio device-tree-compiler libelf-dev dwarves zstd
+          sudo apt-get clean
+          sudo rm -rf /var/lib/apt/lists/*
 
       - name: Install toolchains
         run: |
-          mkdir -p ${{ github.workspace }}/toolchains
-          cd ${{ github.workspace }}/toolchains
+          mkdir -p "${TOOLCHAINS_DIR}"
+          cd "${TOOLCHAINS_DIR}"
           git clone --depth=1 https://github.com/kdrag0n/proton-clang.git clang
           git clone --depth=1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9.git gcc-arm64
           git clone --depth=1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_arm_arm-linux-androideabi-4.9.git gcc-arm32
@@ -50,6 +77,28 @@ jobs:
             fi
           done
 
+      - name: Integrate SukiSU-Ultra
+        working-directory: kernel
+        continue-on-error: true
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh | bash -s susfs-main || true
+          if [ ! -d drivers/kernelsu ]; then
+            echo "kernelsu dir not found, trying fallback"
+            git clone --depth=1 https://github.com/tiann/KernelSU.git /tmp/ksu || true
+            if [ -d /tmp/ksu/kernel ]; then cp -r /tmp/ksu/kernel drivers/kernelsu; fi
+          fi
+          echo "=== kernelsu dir check ==="
+          ls -la drivers/kernelsu/ 2>/dev/null || echo "still missing"
+
+      - name: Fix KernelSU MODULE_IMPORT_NS
+        working-directory: kernel
+        run: |
+          echo "=== before ==="
+          grep -rn "MODULE_IMPORT_NS" drivers/kernelsu/ 2>/dev/null || echo "not found"
+          find drivers/kernelsu -name '*.c' -print0 2>/dev/null | xargs -0 -r sed -i '/MODULE_IMPORT_NS(/d'
+          echo "=== after ==="
+          grep -rn "MODULE_IMPORT_NS" drivers/kernelsu/ 2>/dev/null || echo "all removed"
+
       - name: Patch version strings
         working-directory: kernel
         env:
@@ -69,59 +118,47 @@ jobs:
           sed -i "s/^NAME =.*/NAME = Oblivionis/" Makefile
           FAKE="$FAKE" python3 -c "import pathlib,os;fake=os.environ['FAKE'];p=pathlib.Path('kernel/sys.c');s=p.read_text();needle='memcpy(&tmp, utsname(), sizeof(tmp));';rel='strncpy(tmp.release, \"'+fake+'\", sizeof(tmp.release)-1);';ver='strncpy(tmp.version, \"'+fake+'-Oblivionis\", sizeof(tmp.version)-1);';s=s.replace(needle,needle+' '+rel+' '+ver) if rel not in s else s;p.write_text(s);print('uname patched')"
 
-      - name: Integrate SukiSU-Ultra
-        working-directory: kernel
-        continue-on-error: true
-        run: |
-          curl -LSs https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh | bash -s susfs-main || true
-          if [ ! -d drivers/kernelsu ]; then
-            echo "kernelsu dir not found, trying fallback clone"
-            git clone --depth=1 https://github.com/tiann/KernelSU.git /tmp/ksu || true
-            if [ -d /tmp/ksu/kernel ]; then
-              cp -r /tmp/ksu/kernel drivers/kernelsu
-            fi
-          fi
-          echo "=== kernelsu dir check ==="
-          ls -la drivers/kernelsu/ 2>/dev/null || echo "still missing"
-
-      - name: Fix KernelSU MODULE_IMPORT_NS
-        working-directory: kernel
-        run: |
-          echo "=== before ==="
-          grep -rn "MODULE_IMPORT_NS" drivers/kernelsu/ 2>/dev/null || echo "not found"
-          find drivers/kernelsu -name '*.c' -print0 2>/dev/null | xargs -0 -r sed -i '/MODULE_IMPORT_NS(/d'
-          echo "=== after ==="
-          grep -rn "MODULE_IMPORT_NS" drivers/kernelsu/ 2>/dev/null || echo "all removed"
-
       - name: Configure kernel
         working-directory: kernel
         run: |
-          export ARCH=arm64
-          export PATH="${{ github.workspace }}/toolchains/clang/bin:$PATH"
-          mkdir -p out
-          make O=out ARCH=arm64 CC=clang vendor/kona-perf_defconfig
+          export PATH="${TOOLCHAINS_DIR}/clang/bin:$PATH"
+          mkdir -p "${OUT_DIR}"
+          make O="${OUT_DIR}" ARCH=${ARCH} CC=clang vendor/kona-perf_defconfig
           if [ -f arch/arm64/configs/vendor/oplus.config ]; then
-            ARCH=arm64 scripts/kconfig/merge_config.sh -m -O out out/.config arch/arm64/configs/vendor/oplus.config
+            ARCH=arm64 scripts/kconfig/merge_config.sh -m -O "${OUT_DIR}" "${OUT_DIR}/.config" arch/arm64/configs/vendor/oplus.config
           fi
-          make O=out ARCH=arm64 CC=clang olddefconfig
-          scripts/config --file out/.config -e BPF -e BPF_SYSCALL -e BPF_JIT -e BPF_JIT_ALWAYS_ON -e BPF_JIT_DEFAULT_ON -e BPF_UNPRIV_DEFAULT_OFF -e BPF_EVENTS -e BPF_LSM -e HAVE_EBPF_JIT -e CGROUP_BPF -e NET_CLS_BPF -e NET_ACT_BPF -e DEBUG_INFO -e DEBUG_INFO_DWARF4
-          scripts/config --file out/.config -d DEBUG_INFO_BTF_MODULES
-          scripts/config --file out/.config -d BPF_PRELOAD
-          scripts/config --file out/.config --set-val FRAME_WARN 0
-          make O=out ARCH=arm64 CC=clang olddefconfig
+          make O="${OUT_DIR}" ARCH=${ARCH} CC=clang olddefconfig
+          scripts/config --file "${OUT_DIR}/.config" \
+            -e BPF -e BPF_SYSCALL -e BPF_JIT -e BPF_JIT_ALWAYS_ON -e BPF_JIT_DEFAULT_ON \
+            -e BPF_UNPRIV_DEFAULT_OFF -e BPF_EVENTS -e BPF_LSM -e HAVE_EBPF_JIT \
+            -e CGROUP_BPF -e NET_CLS_BPF -e NET_ACT_BPF \
+            -e DEBUG_INFO -e DEBUG_INFO_DWARF4
+          scripts/config --file "${OUT_DIR}/.config" -d DEBUG_INFO_BTF_MODULES
+          scripts/config --file "${OUT_DIR}/.config" -d BPF_PRELOAD
+          scripts/config --file "${OUT_DIR}/.config" --set-val FRAME_WARN 0
+          make O="${OUT_DIR}" ARCH=${ARCH} CC=clang olddefconfig
           echo "=== config check ==="
-          grep -E "CONFIG_(BPF|BPF_SYSCALL|BPF_JIT|BPF_LSM|DEBUG_INFO_BTF|BPF_PRELOAD)=" out/.config || true
+          grep -E "CONFIG_(BPF|BPF_SYSCALL|BPF_JIT|BPF_LSM|DEBUG_INFO_BTF|BPF_PRELOAD)=" "${OUT_DIR}/.config" || true
+          mkdir -p "${OUT_DIR}/kernel/bpf/preload"
           touch kernel/bpf/preload/bpf_preload_umd 2>/dev/null || true
-          mkdir -p out/kernel/bpf/preload
-          touch out/kernel/bpf/preload/bpf_preload_umd 2>/dev/null || true
+          touch "${OUT_DIR}/kernel/bpf/preload/bpf_preload_umd"
 
       - name: Build kernel
         working-directory: kernel
+        env:
+          CCACHE_DIR: ~/.ccache
+          CCACHE_MAXSIZE: 5G
+          CCACHE_COMPRESS: "1"
         run: |
-          export ARCH=arm64
-          export PATH="${{ github.workspace }}/toolchains/clang/bin:$PATH"
+          export PATH="${TOOLCHAINS_DIR}/clang/bin:$PATH"
+          ccache -s || true
           set -o pipefail
-          make -j$(nproc) O=out ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=${{ github.workspace }}/toolchains/gcc-arm64/bin/aarch64-linux-android- CROSS_COMPILE_ARM32=${{ github.workspace }}/toolchains/gcc-arm32/bin/arm-linux-androideabi- 2>&1 | tee build.log
+          make -j$(nproc) O="${OUT_DIR}" ARCH=${ARCH} \
+            CC="ccache clang" CLANG_TRIPLE=aarch64-linux-gnu- \
+            CROSS_COMPILE="${TOOLCHAINS_DIR}/gcc-arm64/bin/aarch64-linux-android-" \
+            CROSS_COMPILE_ARM32="${TOOLCHAINS_DIR}/gcc-arm32/bin/arm-linux-androideabi-" \
+            2>&1 | tee build.log
+          ccache -s || true
 
       - name: Package with AnyKernel3
         if: success()
@@ -135,12 +172,12 @@ jobs:
           grep -q "^device.name3=" ak3/anykernel.sh || echo "device.name3=OnePlus9R" >> ak3/anykernel.sh
           echo "=== device lines ==="
           grep "^device.name" ak3/anykernel.sh
-          B=kernel/out/arch/arm64/boot
+          B="${OUT_DIR}/arch/arm64/boot"
           if [ -f "$B/Image.gz-dtb" ]; then cp "$B/Image.gz-dtb" ak3/
           elif [ -f "$B/Image.gz" ]; then cp "$B/Image.gz" ak3/
           else cp "$B/Image" ak3/; fi
           cd ak3
-          ZIP="Oblivionis-4.19-lemonades-$(date +%Y%m%d-%H%M).zip"
+          ZIP="${ZIP_PREFIX}-4.19-lemonades-$(date +%Y%m%d-%H%M).zip"
           zip -r9 "../$ZIP" . -x ".git/*"
           echo "ZIP=$ZIP" >> $GITHUB_ENV
 
@@ -148,7 +185,7 @@ jobs:
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: Oblivionis-${{ github.run_number }}
+          name: ${{ env.ZIP_PREFIX }}-${{ github.run_number }}
           path: ${{ env.ZIP }}
           retention-days: 30
 

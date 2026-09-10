@@ -32,6 +32,18 @@ jobs:
           submodules: recursive
           path: kernel
 
+      - name: Verify 5.10 BPF present
+        working-directory: kernel
+        run: |
+          echo "=== kernel/bpf dir ==="
+          ls -la kernel/bpf/ || true
+          echo "=== key files ==="
+          for f in ringbuf.c trampoline.c btf.c bpf_iter.c local_storage.c bpf_lsm.c; do
+            if [ -f "kernel/bpf/$f" ]; then echo "OK      kernel/bpf/$f"; else echo "MISSING kernel/bpf/$f"; fi
+          done
+          echo "=== security/bpf ==="
+          ls -la security/bpf/ 2>/dev/null || echo "MISSING security/bpf/"
+
       - name: Setup ccache
         uses: actions/cache@v4
         with:

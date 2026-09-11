@@ -20,6 +20,8 @@ jobs:
       OUT_DIR: ${{ github.workspace }}/kernel/out
       CCACHE_DIR: ${{ github.workspace }}/.ccache
       ZIP_PREFIX: Oblivionis
+      KSU_REPO: https://github.com/SukiSU-Ultra/SukiSU-Ultra.git
+      KSU_REF: v4.0.0
     steps:
       - name: Free disk
         run: |
@@ -88,16 +90,37 @@ jobs:
             fi
           done
 
-      - name: Integrate SukiSU-Ultra
+      - name: Integrate KernelSU (old tag)
         working-directory: kernel
-        continue-on-error: true
         run: |
-          curl -fsSL https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh | bash -s susfs-main || true
-          if [ ! -d drivers/kernelsu ]; then
-            git clone --depth=1 https://github.com/tiann/KernelSU.git /tmp/ksu || true
-            if [ -d /tmp/ksu/kernel ]; then cp -r /tmp/ksu/kernel drivers/kernelsu; fi
+          echo "=== clone ${KSU_REPO} @ ${KSU_REF} ==="
+          rm -rf /tmp/ksu drivers/kernelsu
+          git clone --depth=1 --branch "${KSU_REF}" "${KSU_REPO}" /tmp/ksu || {
+            echo "::error::git clone failed for ${KSU_REF}"
+            exit 1
+          }
+          echo "=== ksu source tree ==="
+          ls -la /tmp/ksu/
+          echo "=== copying kernel dir to drivers/kernelsu ==="
+          if [ -d /tmp/ksu/kernel ]; then
+            cp -r /tmp/ksu/kernel drivers/kernelsu
+          else
+            echo "::error::no kernel/ dir in ksu repo"
+            exit 1
           fi
-          ls -la drivers/kernelsu/ 2>/dev/null || echo "still missing"
+          echo "=== patching drivers/Makefile + drivers/Kconfig ==="
+          if ! grep -q "kernelsu" drivers/Makefile; then
+            echo 'obj-$(CONFIG_KSU) += kernelsu/' >> drivers/Makefile
+          fi
+          if ! grep -q "kernelsu" drivers/Kconfig; then
+            printf '\nsource "drivers/kernelsu/Kconfig"\n' >> drivers/Kconfig
+          fi
+          echo "=== kernelsu dir ==="
+          ls -la drivers/kernelsu/
+          echo "=== Kconfig tail ==="
+          tail -5 drivers/Kconfig
+          echo "=== Makefile tail ==="
+          tail -5 drivers/Makefile
 
       - name: Fix KernelSU compat for 4.19
         working-directory: kernel
@@ -127,14 +150,14 @@ jobs:
           SC=drivers/kernelsu/infra/seccomp_cache.c
           if [ -f "$SC" ] && ! grep -q "SECCOMP_ARCH_NATIVE_NR_COMPAT" "$SC"; then
             cp "$SC" "$SC.orig"
-            printf '/* 4.19 compat: SECCOMP_ARCH_NATIVE_NR is 5.x */\n#ifndef SECCOMP_ARCH_NATIVE_NR\n#define SECCOMP_ARCH_NATIVE_NR 512\n#define SECCOMP_ARCH_NATIVE_NR_COMPAT 1\n#endif\n' > /tmp/sc_head
+            printf '/* 4.19 compat */\n#ifndef SECCOMP_ARCH_NATIVE_NR\n#define SECCOMP_ARCH_NATIVE_NR 512\n#define SECCOMP_ARCH_NATIVE_NR_COMPAT 1\n#endif\n' > /tmp/sc_head
             cat /tmp/sc_head "$SC.orig" > "$SC"
           fi
 
           echo "=== Create uapi/linux/mount.h shim ==="
           mkdir -p include/uapi/linux
           if [ ! -f include/uapi/linux/mount.h ]; then
-            echo '/* 4.19 shim: uapi/linux/mount.h was split from uapi/linux/fs.h in 5.2 */' > include/uapi/linux/mount.h
+            echo '/* 4.19 shim */' > include/uapi/linux/mount.h
             echo '#ifndef _UAPI_LINUX_MOUNT_H' >> include/uapi/linux/mount.h
             echo '#define _UAPI_LINUX_MOUNT_H' >> include/uapi/linux/mount.h
             echo '#include <linux/types.h>' >> include/uapi/linux/mount.h
@@ -169,8 +192,7 @@ jobs:
             echo '#ifndef MOUNT_ATTR__ATIME' >> include/uapi/linux/mount.h
             echo '#define MOUNT_ATTR__ATIME 0x00000070' >> include/uapi/linux/mount.h
             echo '#endif' >> include/uapi/linux/mount.h
-            echo '#endif /* _UAPI_LINUX_MOUNT_H */' >> include/uapi/linux/mount.h
-            echo "created shim"
+            echo '#endif' >> include/uapi/linux/mount.h
           fi
           ls -la include/uapi/linux/mount.h
 
@@ -210,13 +232,14 @@ jobs:
             -e BPF -e BPF_SYSCALL -e BPF_JIT -e BPF_JIT_ALWAYS_ON -e BPF_JIT_DEFAULT_ON \
             -e BPF_UNPRIV_DEFAULT_OFF -e BPF_EVENTS -e BPF_LSM -e HAVE_EBPF_JIT \
             -e CGROUP_BPF -e NET_CLS_BPF -e NET_ACT_BPF \
-            -e DEBUG_INFO -e DEBUG_INFO_DWARF4
+            -e DEBUG_INFO -e DEBUG_INFO_DWARF4 \
+            -e KSU
           scripts/config --file "${OUT_DIR}/.config" -d DEBUG_INFO_BTF_MODULES
           scripts/config --file "${OUT_DIR}/.config" -d BPF_PRELOAD
           scripts/config --file "${OUT_DIR}/.config" --set-val FRAME_WARN 0
           make O="${OUT_DIR}" ARCH=${ARCH} CC=clang olddefconfig
           echo "=== config check ==="
-          grep -E "CONFIG_(BPF|BPF_SYSCALL|BPF_JIT|BPF_LSM|DEBUG_INFO_BTF|BPF_PRELOAD)=" "${OUT_DIR}/.config" || true
+          grep -E "CONFIG_(BPF|BPF_SYSCALL|BPF_JIT|BPF_LSM|DEBUG_INFO_BTF|BPF_PRELOAD|KSU)=" "${OUT_DIR}/.config" || true
 
       - name: Build kernel
         working-directory: kernel

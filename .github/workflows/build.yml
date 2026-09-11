@@ -1,4 +1,4 @@
-name: Build Oblivionis Kernel (no KernelSU)
+name: Build Oblivionis Kernel
 
 on:
   workflow_dispatch:
@@ -70,7 +70,40 @@ jobs:
           git clone --depth=1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9.git gcc-arm64
           git clone --depth=1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_arm_arm-linux-androideabi-4.9.git gcc-arm32
 
-      - name: Apply patches
+      - name: Fetch external patches (BORE / Simple_LMK / BBG)
+        working-directory: kernel
+        continue-on-error: true
+        run: |
+          mkdir -p patches/external
+
+          echo "=== 1. BORE scheduler ==="
+          git clone --depth=1 https://github.com/firelzrd/bore-scheduler.git /tmp/bore || echo "bore clone failed"
+          if [ -d /tmp/bore ]; then
+            echo "--- bore tree ---"
+            find /tmp/bore -maxdepth 3 -type d | head -30
+            echo "--- bore .patch files ---"
+            find /tmp/bore -name '*.patch' | head -30
+          fi
+
+          echo "=== 2. Simple_LMK ==="
+          git clone --depth=1 https://github.com/kerneltoast/simple_lmk.git /tmp/simple_lmk || echo "simple_lmk clone failed"
+          if [ -d /tmp/simple_lmk ]; then
+            echo "--- simple_lmk tree ---"
+            ls -la /tmp/simple_lmk/
+            echo "--- branches ---"
+            cd /tmp/simple_lmk && git branch -a && cd -
+          fi
+
+          echo "=== 3. Baseband-guard ==="
+          git clone --depth=1 https://github.com/vc-teahouse/Baseband-guard.git /tmp/bbg || echo "bbg clone failed"
+          if [ -d /tmp/bbg ]; then
+            echo "--- bbg tree ---"
+            find /tmp/bbg -maxdepth 3 -type f | head -40
+            echo "--- bbg setup.sh head ---"
+            head -50 /tmp/bbg/setup.sh 2>/dev/null || echo "no setup.sh"
+          fi
+
+      - name: Apply user patches
         working-directory: kernel
         run: |
           git config user.email ci@local
@@ -85,6 +118,75 @@ jobs:
               exit 1
             fi
           done
+
+      - name: Integrate Simple_LMK (best-effort)
+        working-directory: kernel
+        continue-on-error: true
+        run: |
+          if [ ! -d /tmp/simple_lmk ]; then
+            echo "::warning::simple_lmk source not available, skip"
+            exit 0
+          fi
+          echo "=== simple_lmk contents ==="
+          ls -la /tmp/simple_lmk/
+          # 常见的 simple_lmk 结构：drivers/staging/simple_lmk/ 或 drivers/misc/simple_lmk/
+          SRC=""
+          for d in /tmp/simple_lmk/drivers/staging/simple_lmk /tmp/simple_lmk/drivers/misc/simple_lmk /tmp/simple_lmk; do
+            if [ -f "$d/simple_lmk.c" ]; then SRC="$d"; break; fi
+          done
+          if [ -z "$SRC" ]; then
+            echo "::warning::simple_lmk.c not found in expected paths, skip"
+            exit 0
+          fi
+          echo "found simple_lmk source at $SRC"
+          mkdir -p drivers/staging/simple_lmk
+          cp "$SRC"/*.c "$SRC"/*.h drivers/staging/simple_lmk/ 2>/dev/null || true
+          cat > drivers/staging/simple_lmk/Kconfig <<'EOF'
+config SIMPLE_LMK
+	bool "Simple LMK"
+	default y
+EOF
+          cat > drivers/staging/simple_lmk/Makefile <<'EOF'
+obj-$(CONFIG_SIMPLE_LMK) += simple_lmk.o
+EOF
+          # 挂到 drivers/staging/Kconfig 和 Makefile
+          if ! grep -q "simple_lmk" drivers/staging/Kconfig 2>/dev/null; then
+            printf '\nsource "drivers/staging/simple_lmk/Kconfig"\n' >> drivers/staging/Kconfig
+          fi
+          if ! grep -q "simple_lmk" drivers/staging/Makefile 2>/dev/null; then
+            echo 'obj-$(CONFIG_SIMPLE_LMK) += simple_lmk/' >> drivers/staging/Makefile
+          fi
+          echo "simple_lmk integration attempted"
+
+      - name: Integrate Baseband-guard (best-effort)
+        working-directory: kernel
+        continue-on-error: true
+        run: |
+          if [ ! -d /tmp/bbg ]; then
+            echo "::warning::Baseband-guard source not available, skip"
+            exit 0
+          fi
+          echo "=== bbg setup.sh inspection ==="
+          if [ -f /tmp/bbg/setup.sh ]; then
+            head -80 /tmp/bbg/setup.sh
+            echo "=== running bbg setup.sh (dry attempt) ==="
+            cd /tmp/bbg && bash setup.sh 2>&1 | head -50 || true
+          else
+            echo "no setup.sh, try manual integration"
+            # 手动集成：把 bbg 目录 cp 到 security/
+            if [ -d /tmp/bbg/security/baseband_guard ]; then
+              cp -r /tmp/bbg/security/baseband_guard security/
+              if ! grep -q "baseband_guard" security/Kconfig 2>/dev/null; then
+                printf '\nsource "security/baseband_guard/Kconfig"\n' >> security/Kconfig
+              fi
+              if ! grep -q "baseband_guard" security/Makefile 2>/dev/null; then
+                echo 'obj-$(CONFIG_SECURITY_BBG) += baseband_guard/' >> security/Makefile
+              fi
+              echo "bbg manual integration attempted"
+            else
+              echo "::warning::bbg structure unknown, skip"
+            fi
+          fi
 
       - name: Patch version strings
         working-directory: kernel
@@ -119,14 +221,17 @@ jobs:
             -e BPF -e BPF_SYSCALL -e BPF_JIT -e BPF_JIT_ALWAYS_ON -e BPF_JIT_DEFAULT_ON \
             -e BPF_UNPRIV_DEFAULT_OFF -e BPF_EVENTS -e BPF_LSM -e HAVE_EBPF_JIT \
             -e CGROUP_BPF -e NET_CLS_BPF -e NET_ACT_BPF \
-            -e DEBUG_INFO -e DEBUG_INFO_DWARF4
+            -e DEBUG_INFO -e DEBUG_INFO_DWARF4 \
+            -e SCHED_TUNE -e CPU_BOOST -e SCHED_WALT \
+            -e UCLAMP_TASK -e UCLAMP_TASK_GROUP \
+            -e PSI
           scripts/config --file "${OUT_DIR}/.config" -d DEBUG_INFO_BTF_MODULES
           scripts/config --file "${OUT_DIR}/.config" -d BPF_PRELOAD
           scripts/config --file "${OUT_DIR}/.config" -d KSU
           scripts/config --file "${OUT_DIR}/.config" --set-val FRAME_WARN 0
           make O="${OUT_DIR}" ARCH=${ARCH} CC=clang olddefconfig
           echo "=== config check ==="
-          grep -E "CONFIG_(BPF|BPF_SYSCALL|BPF_JIT|BPF_LSM|DEBUG_INFO_BTF|KSU)=" "${OUT_DIR}/.config" || true
+          grep -E "CONFIG_(BPF|BPF_SYSCALL|BPF_JIT|BPF_LSM|DEBUG_INFO_BTF|KSU|SCHED_TUNE|SCHED_WALT|UCLAMP|PSI|SIMPLE_LMK|SECURITY_BBG)=" "${OUT_DIR}/.config" || true
 
       - name: Build kernel
         working-directory: kernel
@@ -149,12 +254,44 @@ jobs:
         if: success()
         run: |
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git ak3
-          sed -i 's/^#\?device\.name1=.*/device.name1=lemonades/' ak3/anykernel.sh
-          sed -i 's/^#\?device\.name2=.*/device.name2=OnePlus 9R/' ak3/anykernel.sh
-          sed -i 's/^#\?device\.name3=.*/device.name3=OnePlus9R/' ak3/anykernel.sh
-          grep -q "^device.name1=" ak3/anykernel.sh || echo "device.name1=lemonades" >> ak3/anykernel.sh
-          grep -q "^device.name2=" ak3/anykernel.sh || echo "device.name2=OnePlus 9R" >> ak3/anykernel.sh
-          grep -q "^device.name3=" ak3/anykernel.sh || echo "device.name3=OnePlus9R" >> ak3/anykernel.sh
+
+          cat > ak3/anykernel.sh <<'AK3'
+### AnyKernel3 Ramdisk Mod Script
+## osm0sis @ xda-developers
+
+properties() { '
+kernel.string=Oblivionis Kernel (4.19.325)
+do.devicecheck=1
+do.modules=0
+do.systemless=1
+do.cleanup=1
+do.cleanuponabort=0
+device.name1=lemonades
+device.name2=OnePlus 9R
+device.name3=OnePlus9R
+device.name4=
+device.name5=
+supported.versions=
+supported.patchlevels=
+supported.vendorpatchlevels=
+'; }
+
+boot_attributes() {
+set_perm_recursive 0 0 755 644 $RAMDISK/*;
+set_perm_recursive 0 0 750 750 $RAMDISK/init* $RAMDISK/sbin;
+}
+
+BLOCK=boot;
+IS_SLOT_DEVICE=1;
+RAMDISK_COMPRESSION=auto;
+PATCH_VBMETA_FLAG=auto;
+
+. tools/ak3-core.sh;
+
+dump_boot;
+write_boot;
+AK3
+
           B="${OUT_DIR}/arch/arm64/boot"
           ls -la "$B/" 2>/dev/null || true
           if [ -f "$B/Image.gz-dtb" ]; then cp "$B/Image.gz-dtb" ak3/
@@ -162,7 +299,7 @@ jobs:
           elif [ -f "$B/Image" ]; then cp "$B/Image" ak3/
           else echo "::error::no Image found"; exit 1; fi
           cd ak3
-          ZIP="${ZIP_PREFIX}-4.19-lemonades-noroot-$(date +%Y%m%d-%H%M).zip"
+          ZIP="${ZIP_PREFIX}-4.19-lemonades-$(date +%Y%m%d-%H%M).zip"
           zip -r9 "../$ZIP" . -x ".git/*"
           echo "ZIP=$ZIP" >> $GITHUB_ENV
 

@@ -17,7 +17,7 @@ jobs:
     env:
       ARCH: arm64
       TOOLCHAINS_DIR: ${{ github.workspace }}/toolchains
-      OUT_DIR: kernel/out
+      OUT_DIR: ${{ github.workspace }}/kernel/out
       ZIP_PREFIX: Oblivionis
     steps:
       - name: Free disk
@@ -36,7 +36,7 @@ jobs:
         working-directory: kernel
         run: |
           for f in ringbuf.c trampoline.c btf.c bpf_iter.c local_storage.c bpf_lsm.c; do
-            if [ -f "kernel/bpf/$f" ]; then echo "OK      kernel/bpf/$f"; else echo "MISSING kernel/bpf/$f"; fi
+            if [ -f "bpf/$f" ]; then echo "OK      kernel/bpf/$f"; else echo "MISSING kernel/bpf/$f"; fi
           done
           ls -la security/bpf/ 2>/dev/null || echo "MISSING security/bpf/"
 
@@ -166,10 +166,10 @@ jobs:
           scripts/config --file "${OUT_DIR}/.config" -d BPF_PRELOAD
           scripts/config --file "${OUT_DIR}/.config" --set-val FRAME_WARN 0
           make O="${OUT_DIR}" ARCH=${ARCH} CC=clang olddefconfig
+          echo "=== config check ==="
           grep -E "CONFIG_(BPF|BPF_SYSCALL|BPF_JIT|BPF_LSM|DEBUG_INFO_BTF|BPF_PRELOAD)=" "${OUT_DIR}/.config" || true
-          mkdir -p "${OUT_DIR}/kernel/bpf/preload"
-          touch kernel/bpf/preload/bpf_preload_umd 2>/dev/null || true
-          touch "${OUT_DIR}/kernel/bpf/preload/bpf_preload_umd"
+          echo "=== OUT_DIR contents ==="
+          ls -la "${OUT_DIR}/.config" || true
 
       - name: Build kernel
         working-directory: kernel
@@ -185,7 +185,6 @@ jobs:
             CC="ccache clang" CLANG_TRIPLE=aarch64-linux-gnu- \
             CROSS_COMPILE="${TOOLCHAINS_DIR}/gcc-arm64/bin/aarch64-linux-android-" \
             CROSS_COMPILE_ARM32="${TOOLCHAINS_DIR}/gcc-arm32/bin/arm-linux-androideabi-" \
-            KCFLAGS="-Wno-unused-variable -Wno-unused-but-set-variable" \
             2>&1 | tee build.log
           ccache -s || true
 
@@ -199,10 +198,15 @@ jobs:
           grep -q "^device.name1=" ak3/anykernel.sh || echo "device.name1=lemonades" >> ak3/anykernel.sh
           grep -q "^device.name2=" ak3/anykernel.sh || echo "device.name2=OnePlus 9R" >> ak3/anykernel.sh
           grep -q "^device.name3=" ak3/anykernel.sh || echo "device.name3=OnePlus9R" >> ak3/anykernel.sh
+          echo "=== device lines ==="
+          grep "^device.name" ak3/anykernel.sh
+          echo "=== boot dir ==="
+          ls -la "${OUT_DIR}/arch/arm64/boot/" 2>/dev/null || echo "boot dir not found"
           B="${OUT_DIR}/arch/arm64/boot"
           if [ -f "$B/Image.gz-dtb" ]; then cp "$B/Image.gz-dtb" ak3/
           elif [ -f "$B/Image.gz" ]; then cp "$B/Image.gz" ak3/
-          else cp "$B/Image" ak3/; fi
+          elif [ -f "$B/Image" ]; then cp "$B/Image" ak3/
+          else echo "::error::no Image found"; exit 1; fi
           cd ak3
           ZIP="${ZIP_PREFIX}-4.19-lemonades-$(date +%Y%m%d-%H%M).zip"
           zip -r9 "../$ZIP" . -x ".git/*"

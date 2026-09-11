@@ -129,22 +129,24 @@ jobs:
             cat /tmp/sc_head "$SC.orig" > "$SC"
           fi
 
-          echo "=== Fix allowlist.c (TWA_RESUME + put_task_struct) ==="
-          AL=drivers/kernelsu/allowlist.c
-          if [ -f "$AL" ] && ! grep -q "TWA_RESUME_COMPAT_4_19" "$AL"; then
-            cp "$AL" "$AL.orig"
-            printf '/* 4.19 compat */\n#include <linux/sched/task.h>\n#ifndef TWA_RESUME\n#define TWA_RESUME true\n#define TWA_RESUME_COMPAT_4_19 1\n#endif\n' > /tmp/al_head
-            cat /tmp/al_head "$AL.orig" > "$AL"
-          fi
+          echo "=== Fix ALL allowlist.c files (find all paths) ==="
+          find drivers/kernelsu -name 'allowlist.c' -print0 | while IFS= read -r -d '' AL; do
+            if [ -f "$AL" ] && ! grep -q "TWA_RESUME_COMPAT_4_19" "$AL"; then
+              cp "$AL" "$AL.orig"
+              printf '/* 4.19 compat: TWA_RESUME (enum->bool) + put_task_struct */\n#include <linux/sched/task.h>\n#ifndef TWA_RESUME\n#define TWA_RESUME true\n#define TWA_RESUME_COMPAT_4_19 1\n#endif\n' > /tmp/al_head
+              cat /tmp/al_head "$AL.orig" > "$AL"
+              echo "patched: $AL"
+            else
+              echo "skip (already patched or missing): $AL"
+            fi
+          done
 
-          echo "=== Fix pkg_observer.c (fsnotify 5.x field) ==="
+          echo "=== Fix pkg_observer.c ==="
           PO=drivers/kernelsu/manager/pkg_observer.c
           if [ -f "$PO" ]; then
             cp "$PO" "$PO.orig"
             sed -i 's|\.handle_inode_event = ksu_handle_inode_event,|/* .handle_inode_event removed for 4.19 compat */|' "$PO"
             sed -i 's|int ksu_handle_inode_event(|int __attribute__((unused)) ksu_handle_inode_event(|' "$PO"
-            echo "--- diff ---"
-            diff -u "$PO.orig" "$PO" | head -30 || true
           fi
 
           echo "=== Create uapi/linux/mount.h shim ==="
@@ -188,8 +190,8 @@ jobs:
             echo '#endif' >> include/uapi/linux/mount.h
           fi
 
-          echo "=== remaining problematic symbols ==="
-          grep -rn "TWA_RESUME\|MODULE_IMPORT_NS\|SECCOMP_ARCH_NATIVE_NR\|handle_inode_event" drivers/kernelsu/ 2>/dev/null | grep -v "true\|disabled\|512\|removed" || echo "clean"
+          echo "=== check TWA_RESUME status in all allowlist.c ==="
+          find drivers/kernelsu -name 'allowlist.c' -exec grep -l "TWA_RESUME_COMPAT_4_19" {} \;
 
       - name: Patch version strings
         working-directory: kernel

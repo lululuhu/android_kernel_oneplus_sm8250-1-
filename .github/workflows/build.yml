@@ -127,68 +127,50 @@ jobs:
           SC=drivers/kernelsu/infra/seccomp_cache.c
           if [ -f "$SC" ] && ! grep -q "SECCOMP_ARCH_NATIVE_NR_COMPAT" "$SC"; then
             cp "$SC" "$SC.orig"
-            {
-              echo "/* 4.19 compat: SECCOMP_ARCH_NATIVE_NR is 5.x */"
-              echo "#ifndef SECCOMP_ARCH_NATIVE_NR"
-              echo "#define SECCOMP_ARCH_NATIVE_NR 512"
-              echo "#define SECCOMP_ARCH_NATIVE_NR_COMPAT 1"
-              echo "#endif"
-              cat "$SC.orig"
-            } > "$SC"
+            printf '/* 4.19 compat: SECCOMP_ARCH_NATIVE_NR is 5.x */\n#ifndef SECCOMP_ARCH_NATIVE_NR\n#define SECCOMP_ARCH_NATIVE_NR 512\n#define SECCOMP_ARCH_NATIVE_NR_COMPAT 1\n#endif\n' > /tmp/sc_head
+            cat /tmp/sc_head "$SC.orig" > "$SC"
           fi
 
-          echo "=== Create uapi/linux/mount.h shim for 4.19 ==="
+          echo "=== Create uapi/linux/mount.h shim ==="
           mkdir -p include/uapi/linux
-          if [ ! -f include/uapi/linux/mount.h ] || ! grep -q "4.19 shim" include/uapi/linux/mount.h 2>/dev/null; then
-            cat > include/uapi/linux/mount.h <<'MOUNT_SHIM'
-/* 4.19 shim: uapi/linux/mount.h was split from uapi/linux/fs.h in 5.2 */
-#ifndef _UAPI_LINUX_MOUNT_H
-#define _UAPI_LINUX_MOUNT_H
-
-#include <linux/types.h>
-#include <uapi/linux/fs.h>
-
-/* 4.19 lacks these 5.x mount flags, define no-ops for compat */
-#ifndef MS_NOSYMFOLLOW
-#define MS_NOSYMFOLLOW 256
-#endif
-#ifndef MOUNT_ATTR_RDONLY
-#define MOUNT_ATTR_RDONLY 0x00000001
-#endif
-#ifndef MOUNT_ATTR_NOSUID
-#define MOUNT_ATTR_NOSUID 0x00000002
-#endif
-#ifndef MOUNT_ATTR_NODEV
-#define MOUNT_ATTR_NODEV  0x00000004
-#endif
-#ifndef MOUNT_ATTR_NOEXEC
-#define MOUNT_ATTR_NOEXEC 0x00000008
-#endif
-#ifndef MOUNT_ATTR__ATIME
-#define MOUNT_ATTR__ATIME 0x00000070
-#endif
-#ifndef MOUNT_ATTR_RELATIME
-#define MOUNT_ATTR_RELATIME 0x00000000
-#endif
-#ifndef MOUNT_ATTR_NOATIME
-#define MOUNT_ATTR_NOATIME  0x00000010
-#endif
-#ifndef MOUNT_ATTR_STRICTATIME
-#define MOUNT_ATTR_STRICTATIME 0x00000020
-#endif
-#ifndef MOUNT_ATTR_NODIRATIME
-#define MOUNT_ATTR_NODIRATIME  0x00000080
-#endif
-#ifndef MOUNT_ATTR_IDMAP
-#define MOUNT_ATTR_IDMAP  0x00100000
-#endif
-#ifndef MOUNT_ATTR_NOSYMFOLLOW
-#define MOUNT_ATTR_NOSYMFOLLOW 0x00200000
-#endif
-
-#endif /* _UAPI_LINUX_MOUNT_H */
-MOUNT_SHIM
-            echo "created shim: include/uapi/linux/mount.h"
+          if [ ! -f include/uapi/linux/mount.h ]; then
+            echo '/* 4.19 shim: uapi/linux/mount.h was split from uapi/linux/fs.h in 5.2 */' > include/uapi/linux/mount.h
+            echo '#ifndef _UAPI_LINUX_MOUNT_H' >> include/uapi/linux/mount.h
+            echo '#define _UAPI_LINUX_MOUNT_H' >> include/uapi/linux/mount.h
+            echo '#include <linux/types.h>' >> include/uapi/linux/mount.h
+            echo '#include <uapi/linux/fs.h>' >> include/uapi/linux/mount.h
+            echo '#ifndef MS_NOSYMFOLLOW' >> include/uapi/linux/mount.h
+            echo '#define MS_NOSYMFOLLOW 256' >> include/uapi/linux/mount.h
+            echo '#endif' >> include/uapi/linux/mount.h
+            echo '#ifndef MOUNT_ATTR_RDONLY' >> include/uapi/linux/mount.h
+            echo '#define MOUNT_ATTR_RDONLY 0x00000001' >> include/uapi/linux/mount.h
+            echo '#endif' >> include/uapi/linux/mount.h
+            echo '#ifndef MOUNT_ATTR_NOSUID' >> include/uapi/linux/mount.h
+            echo '#define MOUNT_ATTR_NOSUID 0x00000002' >> include/uapi/linux/mount.h
+            echo '#endif' >> include/uapi/linux/mount.h
+            echo '#ifndef MOUNT_ATTR_NODEV' >> include/uapi/linux/mount.h
+            echo '#define MOUNT_ATTR_NODEV 0x00000004' >> include/uapi/linux/mount.h
+            echo '#endif' >> include/uapi/linux/mount.h
+            echo '#ifndef MOUNT_ATTR_NOEXEC' >> include/uapi/linux/mount.h
+            echo '#define MOUNT_ATTR_NOEXEC 0x00000008' >> include/uapi/linux/mount.h
+            echo '#endif' >> include/uapi/linux/mount.h
+            echo '#ifndef MOUNT_ATTR_NOATIME' >> include/uapi/linux/mount.h
+            echo '#define MOUNT_ATTR_NOATIME 0x00000010' >> include/uapi/linux/mount.h
+            echo '#endif' >> include/uapi/linux/mount.h
+            echo '#ifndef MOUNT_ATTR_STRICTATIME' >> include/uapi/linux/mount.h
+            echo '#define MOUNT_ATTR_STRICTATIME 0x00000020' >> include/uapi/linux/mount.h
+            echo '#endif' >> include/uapi/linux/mount.h
+            echo '#ifndef MOUNT_ATTR_RELATIME' >> include/uapi/linux/mount.h
+            echo '#define MOUNT_ATTR_RELATIME 0x00000000' >> include/uapi/linux/mount.h
+            echo '#endif' >> include/uapi/linux/mount.h
+            echo '#ifndef MOUNT_ATTR_NODIRATIME' >> include/uapi/linux/mount.h
+            echo '#define MOUNT_ATTR_NODIRATIME 0x00000080' >> include/uapi/linux/mount.h
+            echo '#endif' >> include/uapi/linux/mount.h
+            echo '#ifndef MOUNT_ATTR__ATIME' >> include/uapi/linux/mount.h
+            echo '#define MOUNT_ATTR__ATIME 0x00000070' >> include/uapi/linux/mount.h
+            echo '#endif' >> include/uapi/linux/mount.h
+            echo '#endif /* _UAPI_LINUX_MOUNT_H */' >> include/uapi/linux/mount.h
+            echo "created shim"
           fi
           ls -la include/uapi/linux/mount.h
 

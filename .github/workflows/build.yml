@@ -75,7 +75,6 @@ jobs:
         continue-on-error: true
         run: |
           mkdir -p patches/external
-
           echo "=== 1. BORE scheduler ==="
           git clone --depth=1 https://github.com/firelzrd/bore-scheduler.git /tmp/bore || echo "bore clone failed"
           if [ -d /tmp/bore ]; then
@@ -84,7 +83,6 @@ jobs:
             echo "--- bore .patch files ---"
             find /tmp/bore -name '*.patch' | head -30
           fi
-
           echo "=== 2. Simple_LMK ==="
           git clone --depth=1 https://github.com/kerneltoast/simple_lmk.git /tmp/simple_lmk || echo "simple_lmk clone failed"
           if [ -d /tmp/simple_lmk ]; then
@@ -93,7 +91,6 @@ jobs:
             echo "--- branches ---"
             cd /tmp/simple_lmk && git branch -a && cd -
           fi
-
           echo "=== 3. Baseband-guard ==="
           git clone --depth=1 https://github.com/vc-teahouse/Baseband-guard.git /tmp/bbg || echo "bbg clone failed"
           if [ -d /tmp/bbg ]; then
@@ -119,6 +116,41 @@ jobs:
             fi
           done
 
+      - name: Anti-format protection
+        working-directory: kernel
+        run: |
+          PROTECT_FILE="block/blk-core.c"
+          if [ -f "$PROTECT_FILE" ] && ! grep -q "OBLIVIONIS_ANTI_FORMAT" "$PROTECT_FILE"; then
+            cp "$PROTECT_FILE" "$PROTECT_FILE.orig"
+            python3 - <<'PY'
+          import pathlib
+          p = pathlib.Path("block/blk-core.c")
+          s = p.read_text()
+          if "OBLIVIONIS_ANTI_FORMAT" in s:
+              print("already patched")
+          else:
+              needle = "void submit_bio(int rw, struct bio *bio)\n{"
+              inject = needle + '''
+          \t/* OBLIVIONIS_ANTI_FORMAT: block discard/secure erase on mmcblk0 */
+          \tif (bio_op(bio) == REQ_OP_DISCARD || bio_op(bio) == REQ_OP_SECURE_ERASE) {
+          \t\tstruct gendisk *gd = bio->bi_disk;
+          \t\tif (gd && gd->disk_name && !strncmp(gd->disk_name, "mmcblk0", 7)) {
+          \t\t\tpr_err("OBLIVIONIS: blocked discard/erase on %s sector=%llu\\n",
+          \t\t\t       gd->disk_name, (unsigned long long)bio->bi_iter.bi_sector);
+          \t\t\tbio_io_error(bio);
+          \t\t\treturn;
+          \t\t}
+          \t}
+          '''
+              if needle in s:
+                  s = s.replace(needle, inject, 1)
+                  p.write_text(s)
+                  print("anti-format injected")
+              else:
+                  print("needle not found, skip")
+          PY
+          fi
+
       - name: Integrate Simple_LMK (best-effort)
         working-directory: kernel
         continue-on-error: true
@@ -129,32 +161,24 @@ jobs:
           fi
           echo "=== simple_lmk contents ==="
           ls -la /tmp/simple_lmk/
-          # 常见的 simple_lmk 结构：drivers/staging/simple_lmk/ 或 drivers/misc/simple_lmk/
           SRC=""
           for d in /tmp/simple_lmk/drivers/staging/simple_lmk /tmp/simple_lmk/drivers/misc/simple_lmk /tmp/simple_lmk; do
             if [ -f "$d/simple_lmk.c" ]; then SRC="$d"; break; fi
           done
           if [ -z "$SRC" ]; then
-            echo "::warning::simple_lmk.c not found in expected paths, skip"
+            echo "::warning::simple_lmk.c not found, skip"
             exit 0
           fi
           echo "found simple_lmk source at $SRC"
           mkdir -p drivers/staging/simple_lmk
           cp "$SRC"/*.c "$SRC"/*.h drivers/staging/simple_lmk/ 2>/dev/null || true
-          cat > drivers/staging/simple_lmk/Kconfig <<'EOF'
-config SIMPLE_LMK
-	bool "Simple LMK"
-	default y
-EOF
-          cat > drivers/staging/simple_lmk/Makefile <<'EOF'
-obj-$(CONFIG_SIMPLE_LMK) += simple_lmk.o
-EOF
-          # 挂到 drivers/staging/Kconfig 和 Makefile
+          printf 'config SIMPLE_LMK\n\tbool "Simple LMK"\n\tdefault y\n' > drivers/staging/simple_lmk/Kconfig
+          printf 'obj-$(CONFIG_SIMPLE_LMK) += simple_lmk.o\n' > drivers/staging/simple_lmk/Makefile
           if ! grep -q "simple_lmk" drivers/staging/Kconfig 2>/dev/null; then
             printf '\nsource "drivers/staging/simple_lmk/Kconfig"\n' >> drivers/staging/Kconfig
           fi
           if ! grep -q "simple_lmk" drivers/staging/Makefile 2>/dev/null; then
-            echo 'obj-$(CONFIG_SIMPLE_LMK) += simple_lmk/' >> drivers/staging/Makefile
+            printf 'obj-$(CONFIG_SIMPLE_LMK) += simple_lmk/\n' >> drivers/staging/Makefile
           fi
           echo "simple_lmk integration attempted"
 
@@ -169,18 +193,17 @@ EOF
           echo "=== bbg setup.sh inspection ==="
           if [ -f /tmp/bbg/setup.sh ]; then
             head -80 /tmp/bbg/setup.sh
-            echo "=== running bbg setup.sh (dry attempt) ==="
+            echo "=== running bbg setup.sh ==="
             cd /tmp/bbg && bash setup.sh 2>&1 | head -50 || true
           else
-            echo "no setup.sh, try manual integration"
-            # 手动集成：把 bbg 目录 cp 到 security/
+            echo "no setup.sh, trying manual"
             if [ -d /tmp/bbg/security/baseband_guard ]; then
               cp -r /tmp/bbg/security/baseband_guard security/
               if ! grep -q "baseband_guard" security/Kconfig 2>/dev/null; then
                 printf '\nsource "security/baseband_guard/Kconfig"\n' >> security/Kconfig
               fi
               if ! grep -q "baseband_guard" security/Makefile 2>/dev/null; then
-                echo 'obj-$(CONFIG_SECURITY_BBG) += baseband_guard/' >> security/Makefile
+                printf 'obj-$(CONFIG_SECURITY_BBG) += baseband_guard/\n' >> security/Makefile
               fi
               echo "bbg manual integration attempted"
             else
@@ -255,42 +278,35 @@ EOF
         run: |
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git ak3
 
-          cat > ak3/anykernel.sh <<'AK3'
-### AnyKernel3 Ramdisk Mod Script
-## osm0sis @ xda-developers
-
-properties() { '
-kernel.string=Oblivionis Kernel (4.19.325)
-do.devicecheck=1
-do.modules=0
-do.systemless=1
-do.cleanup=1
-do.cleanuponabort=0
-device.name1=lemonades
-device.name2=OnePlus 9R
-device.name3=OnePlus9R
-device.name4=
-device.name5=
-supported.versions=
-supported.patchlevels=
-supported.vendorpatchlevels=
-'; }
-
-boot_attributes() {
-set_perm_recursive 0 0 755 644 $RAMDISK/*;
-set_perm_recursive 0 0 750 750 $RAMDISK/init* $RAMDISK/sbin;
-}
-
-BLOCK=boot;
-IS_SLOT_DEVICE=1;
-RAMDISK_COMPRESSION=auto;
-PATCH_VBMETA_FLAG=auto;
-
-. tools/ak3-core.sh;
-
-dump_boot;
-write_boot;
-AK3
+          printf '### AnyKernel3 Ramdisk Mod Script\n' > ak3/anykernel.sh
+          printf '## osm0sis @ xda-developers\n\n' >> ak3/anykernel.sh
+          printf "properties() { '\n" >> ak3/anykernel.sh
+          printf 'kernel.string=Oblivionis Kernel (4.19.325)\n' >> ak3/anykernel.sh
+          printf 'do.devicecheck=1\n' >> ak3/anykernel.sh
+          printf 'do.modules=0\n' >> ak3/anykernel.sh
+          printf 'do.systemless=1\n' >> ak3/anykernel.sh
+          printf 'do.cleanup=1\n' >> ak3/anykernel.sh
+          printf 'do.cleanuponabort=0\n' >> ak3/anykernel.sh
+          printf 'device.name1=lemonades\n' >> ak3/anykernel.sh
+          printf 'device.name2=OnePlus 9R\n' >> ak3/anykernel.sh
+          printf 'device.name3=OnePlus9R\n' >> ak3/anykernel.sh
+          printf 'device.name4=\n' >> ak3/anykernel.sh
+          printf 'device.name5=\n' >> ak3/anykernel.sh
+          printf 'supported.versions=\n' >> ak3/anykernel.sh
+          printf 'supported.patchlevels=\n' >> ak3/anykernel.sh
+          printf 'supported.vendorpatchlevels=\n' >> ak3/anykernel.sh
+          printf "'; }\n\n" >> ak3/anykernel.sh
+          printf 'boot_attributes() {\n' >> ak3/anykernel.sh
+          printf 'set_perm_recursive 0 0 755 644 $RAMDISK/*;\n' >> ak3/anykernel.sh
+          printf 'set_perm_recursive 0 0 750 750 $RAMDISK/init* $RAMDISK/sbin;\n' >> ak3/anykernel.sh
+          printf '}\n\n' >> ak3/anykernel.sh
+          printf 'BLOCK=boot;\n' >> ak3/anykernel.sh
+          printf 'IS_SLOT_DEVICE=1;\n' >> ak3/anykernel.sh
+          printf 'RAMDISK_COMPRESSION=auto;\n' >> ak3/anykernel.sh
+          printf 'PATCH_VBMETA_FLAG=auto;\n\n' >> ak3/anykernel.sh
+          printf '. tools/ak3-core.sh;\n\n' >> ak3/anykernel.sh
+          printf 'dump_boot;\n' >> ak3/anykernel.sh
+          printf 'write_boot;\n' >> ak3/anykernel.sh
 
           B="${OUT_DIR}/arch/arm64/boot"
           ls -la "$B/" 2>/dev/null || true

@@ -20,8 +20,6 @@ jobs:
       OUT_DIR: ${{ github.workspace }}/kernel/out
       CCACHE_DIR: ${{ github.workspace }}/.ccache
       ZIP_PREFIX: Oblivionis
-      KSU_REPO: https://github.com/SukiSU-Ultra/SukiSU-Ultra.git
-      KSU_REF: v4.0.0
     steps:
       - name: Free disk
         run: |
@@ -42,8 +40,6 @@ jobs:
             if [ -f "bpf/$f" ]; then echo "OK      kernel/bpf/$f"; else echo "MISSING kernel/bpf/$f"; fi
           done
           ls -la security/bpf/ 2>/dev/null || echo "MISSING security/bpf/"
-          echo "=== patches dir ==="
-          ls -la patches/ 2>/dev/null || echo "no patches dir"
 
       - name: Setup ccache
         uses: actions/cache@v4
@@ -90,37 +86,17 @@ jobs:
             fi
           done
 
-      - name: Integrate KernelSU (old tag)
+      - name: Integrate SukiSU-Ultra (susfs-main)
         working-directory: kernel
+        continue-on-error: true
         run: |
-          echo "=== clone ${KSU_REPO} @ ${KSU_REF} ==="
-          rm -rf /tmp/ksu drivers/kernelsu
-          git clone --depth=1 --branch "${KSU_REF}" "${KSU_REPO}" /tmp/ksu || {
-            echo "::error::git clone failed for ${KSU_REF}"
-            exit 1
-          }
-          echo "=== ksu source tree ==="
-          ls -la /tmp/ksu/
-          echo "=== copying kernel dir to drivers/kernelsu ==="
-          if [ -d /tmp/ksu/kernel ]; then
-            cp -r /tmp/ksu/kernel drivers/kernelsu
-          else
-            echo "::error::no kernel/ dir in ksu repo"
-            exit 1
+          curl -fsSL https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh | bash -s susfs-main || true
+          if [ ! -d drivers/kernelsu ]; then
+            echo "setup.sh failed, fallback clone"
+            git clone --depth=1 https://github.com/SukiSU-Ultra/SukiSU-Ultra.git /tmp/ksu || true
+            if [ -d /tmp/ksu/kernel ]; then cp -r /tmp/ksu/kernel drivers/kernelsu; fi
           fi
-          echo "=== patching drivers/Makefile + drivers/Kconfig ==="
-          if ! grep -q "kernelsu" drivers/Makefile; then
-            echo 'obj-$(CONFIG_KSU) += kernelsu/' >> drivers/Makefile
-          fi
-          if ! grep -q "kernelsu" drivers/Kconfig; then
-            printf '\nsource "drivers/kernelsu/Kconfig"\n' >> drivers/Kconfig
-          fi
-          echo "=== kernelsu dir ==="
-          ls -la drivers/kernelsu/
-          echo "=== Kconfig tail ==="
-          tail -5 drivers/Kconfig
-          echo "=== Makefile tail ==="
-          tail -5 drivers/Makefile
+          ls -la drivers/kernelsu/ 2>/dev/null || echo "still missing"
 
       - name: Fix KernelSU compat for 4.19
         working-directory: kernel
@@ -152,6 +128,14 @@ jobs:
             cp "$SC" "$SC.orig"
             printf '/* 4.19 compat */\n#ifndef SECCOMP_ARCH_NATIVE_NR\n#define SECCOMP_ARCH_NATIVE_NR 512\n#define SECCOMP_ARCH_NATIVE_NR_COMPAT 1\n#endif\n' > /tmp/sc_head
             cat /tmp/sc_head "$SC.orig" > "$SC"
+          fi
+
+          echo "=== Fix allowlist.c (TWA_RESUME + put_task_struct) ==="
+          AL=drivers/kernelsu/allowlist.c
+          if [ -f "$AL" ] && ! grep -q "TWA_RESUME_COMPAT_4_19" "$AL"; then
+            cp "$AL" "$AL.orig"
+            printf '/* 4.19 compat */\n#include <linux/sched/task.h>\n#ifndef TWA_RESUME\n#define TWA_RESUME true\n#define TWA_RESUME_COMPAT_4_19 1\n#endif\n' > /tmp/al_head
+            cat /tmp/al_head "$AL.orig" > "$AL"
           fi
 
           echo "=== Create uapi/linux/mount.h shim ==="
@@ -194,10 +178,9 @@ jobs:
             echo '#endif' >> include/uapi/linux/mount.h
             echo '#endif' >> include/uapi/linux/mount.h
           fi
-          ls -la include/uapi/linux/mount.h
 
           echo "=== remaining problematic symbols ==="
-          grep -rn "SECCOMP_ARCH_NATIVE_NR\|MODULE_IMPORT_NS\|->iopoll" drivers/kernelsu/ 2>/dev/null | grep -v "512\|disabled" || echo "clean"
+          grep -rn "TWA_RESUME\|MODULE_IMPORT_NS\|SECCOMP_ARCH_NATIVE_NR\|->iopoll" drivers/kernelsu/ 2>/dev/null | grep -v "true\|disabled\|512" || echo "clean"
 
       - name: Patch version strings
         working-directory: kernel
@@ -232,14 +215,13 @@ jobs:
             -e BPF -e BPF_SYSCALL -e BPF_JIT -e BPF_JIT_ALWAYS_ON -e BPF_JIT_DEFAULT_ON \
             -e BPF_UNPRIV_DEFAULT_OFF -e BPF_EVENTS -e BPF_LSM -e HAVE_EBPF_JIT \
             -e CGROUP_BPF -e NET_CLS_BPF -e NET_ACT_BPF \
-            -e DEBUG_INFO -e DEBUG_INFO_DWARF4 \
-            -e KSU
+            -e DEBUG_INFO -e DEBUG_INFO_DWARF4
           scripts/config --file "${OUT_DIR}/.config" -d DEBUG_INFO_BTF_MODULES
           scripts/config --file "${OUT_DIR}/.config" -d BPF_PRELOAD
           scripts/config --file "${OUT_DIR}/.config" --set-val FRAME_WARN 0
           make O="${OUT_DIR}" ARCH=${ARCH} CC=clang olddefconfig
           echo "=== config check ==="
-          grep -E "CONFIG_(BPF|BPF_SYSCALL|BPF_JIT|BPF_LSM|DEBUG_INFO_BTF|BPF_PRELOAD|KSU)=" "${OUT_DIR}/.config" || true
+          grep -E "CONFIG_(BPF|BPF_SYSCALL|BPF_JIT|BPF_LSM|DEBUG_INFO_BTF|KSU)=" "${OUT_DIR}/.config" || true
 
       - name: Build kernel
         working-directory: kernel

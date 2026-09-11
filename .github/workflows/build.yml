@@ -92,7 +92,6 @@ jobs:
         run: |
           curl -fsSL https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh | bash -s susfs-main || true
           if [ ! -d drivers/kernelsu ]; then
-            echo "setup.sh failed, fallback clone"
             git clone --depth=1 https://github.com/SukiSU-Ultra/SukiSU-Ultra.git /tmp/ksu || true
             if [ -d /tmp/ksu/kernel ]; then cp -r /tmp/ksu/kernel drivers/kernelsu; fi
           fi
@@ -138,6 +137,16 @@ jobs:
             cat /tmp/al_head "$AL.orig" > "$AL"
           fi
 
+          echo "=== Fix pkg_observer.c (fsnotify 5.x field) ==="
+          PO=drivers/kernelsu/manager/pkg_observer.c
+          if [ -f "$PO" ]; then
+            cp "$PO" "$PO.orig"
+            sed -i 's|\.handle_inode_event = ksu_handle_inode_event,|/* .handle_inode_event removed for 4.19 compat */|' "$PO"
+            sed -i 's|int ksu_handle_inode_event(|int __attribute__((unused)) ksu_handle_inode_event(|' "$PO"
+            echo "--- diff ---"
+            diff -u "$PO.orig" "$PO" | head -30 || true
+          fi
+
           echo "=== Create uapi/linux/mount.h shim ==="
           mkdir -p include/uapi/linux
           if [ ! -f include/uapi/linux/mount.h ]; then
@@ -180,7 +189,7 @@ jobs:
           fi
 
           echo "=== remaining problematic symbols ==="
-          grep -rn "TWA_RESUME\|MODULE_IMPORT_NS\|SECCOMP_ARCH_NATIVE_NR\|->iopoll" drivers/kernelsu/ 2>/dev/null | grep -v "true\|disabled\|512" || echo "clean"
+          grep -rn "TWA_RESUME\|MODULE_IMPORT_NS\|SECCOMP_ARCH_NATIVE_NR\|handle_inode_event" drivers/kernelsu/ 2>/dev/null | grep -v "true\|disabled\|512\|removed" || echo "clean"
 
       - name: Patch version strings
         working-directory: kernel

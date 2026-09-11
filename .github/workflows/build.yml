@@ -111,22 +111,48 @@ jobs:
           FW=drivers/kernelsu/infra/file_wrapper.c
           if [ -f "$FW" ]; then
             cp "$FW" "$FW.orig"
-
             sed -i 's|return orig->f_op->iopoll(kiocb, spin);|return 0;|g' "$FW"
             sed -i 's|p->ops.iopoll = fp->f_op->iopoll ? ksu_wrapper_iopoll : NULL;|/* iopoll disabled on 4.19 */|g' "$FW"
             sed -i 's|if (remap_flags & REMAP_FILE_DEDUP) {|if (0) {|g' "$FW"
             sed -i 's|return orig->f_op->remap_file_range(file_in, pos_in, orig, pos_out, len, remap_flags);|return -EINVAL;|g' "$FW"
             sed -i 's|return orig->f_op->remap_file_range(orig, pos_in, file_out, pos_out, len, remap_flags);|return -EINVAL;|g' "$FW"
             sed -i 's|p->ops.remap_file_range = fp->f_op->remap_file_range ? ksu_wrapper_remap_file_range : NULL;|/* remap_file_range disabled on 4.19 */|g' "$FW"
-
             sed -i 's|struct file \*orig = data->orig;|struct file *orig __attribute__((unused)) = data->orig;|g' "$FW"
-
-            echo "=== diff ==="
+            echo "--- diff ---"
             diff -u "$FW.orig" "$FW" | head -60 || true
           fi
 
-          echo "=== remaining 4.19-incompatible symbols ==="
-          grep -n "iopoll\|remap_file_range\|REMAP_FILE_DEDUP\|MODULE_IMPORT_NS" "$FW" 2>/dev/null || echo "clean"
+          echo "=== Fix seccomp_cache.c ==="
+          SC=drivers/kernelsu/infra/seccomp_cache.c
+          if [ -f "$SC" ] && ! grep -q "SECCOMP_ARCH_NATIVE_NR_COMPAT" "$SC"; then
+            cp "$SC" "$SC.orig"
+            {
+              echo "/* 4.19 compat: SECCOMP_ARCH_NATIVE_NR is 5.x */"
+              echo "#ifndef SECCOMP_ARCH_NATIVE_NR"
+              echo "#define SECCOMP_ARCH_NATIVE_NR 512"
+              echo "#define SECCOMP_ARCH_NATIVE_NR_COMPAT 1"
+              echo "#endif"
+              cat "$SC.orig"
+            } > "$SC"
+            echo "--- diff ---"
+            diff -u "$SC.orig" "$SC" | head -30 || true
+          fi
+
+          echo "=== Fix pkg_observer / other 5.x-only symbols (best-effort) ==="
+          # 加一些常见缺失宏的兼容定义，作为保底
+          grep -rln "SECCOMP_ARCH_NATIVE_NR" drivers/kernelsu/ 2>/dev/null | while read f; do
+            if ! grep -q "SECCOMP_ARCH_NATIVE_NR 512" "$f"; then
+              {
+                echo "#ifndef SECCOMP_ARCH_NATIVE_NR"
+                echo "#define SECCOMP_ARCH_NATIVE_NR 512"
+                echo "#endif"
+                cat "$f"
+              } > "$f.tmp" && mv "$f.tmp" "$f"
+            fi
+          done
+
+          echo "=== remaining problematic symbols ==="
+          grep -rn "SECCOMP_ARCH_NATIVE_NR\|MODULE_IMPORT_NS\|remap_file_range\|->iopoll" drivers/kernelsu/ 2>/dev/null | grep -v "512\|disabled" || echo "clean"
 
       - name: Patch version strings
         working-directory: kernel
@@ -168,8 +194,6 @@ jobs:
           make O="${OUT_DIR}" ARCH=${ARCH} CC=clang olddefconfig
           echo "=== config check ==="
           grep -E "CONFIG_(BPF|BPF_SYSCALL|BPF_JIT|BPF_LSM|DEBUG_INFO_BTF|BPF_PRELOAD)=" "${OUT_DIR}/.config" || true
-          echo "=== OUT_DIR contents ==="
-          ls -la "${OUT_DIR}/.config" || true
 
       - name: Build kernel
         working-directory: kernel
@@ -198,11 +222,8 @@ jobs:
           grep -q "^device.name1=" ak3/anykernel.sh || echo "device.name1=lemonades" >> ak3/anykernel.sh
           grep -q "^device.name2=" ak3/anykernel.sh || echo "device.name2=OnePlus 9R" >> ak3/anykernel.sh
           grep -q "^device.name3=" ak3/anykernel.sh || echo "device.name3=OnePlus9R" >> ak3/anykernel.sh
-          echo "=== device lines ==="
-          grep "^device.name" ak3/anykernel.sh
-          echo "=== boot dir ==="
-          ls -la "${OUT_DIR}/arch/arm64/boot/" 2>/dev/null || echo "boot dir not found"
           B="${OUT_DIR}/arch/arm64/boot"
+          ls -la "$B/" 2>/dev/null || true
           if [ -f "$B/Image.gz-dtb" ]; then cp "$B/Image.gz-dtb" ak3/
           elif [ -f "$B/Image.gz" ]; then cp "$B/Image.gz" ak3/
           elif [ -f "$B/Image" ]; then cp "$B/Image" ak3/

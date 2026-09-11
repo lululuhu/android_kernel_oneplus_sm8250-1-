@@ -92,30 +92,22 @@ jobs:
         working-directory: kernel
         continue-on-error: true
         run: |
-          echo "=== before setup ==="
-          ls -la drivers/ 2>/dev/null | grep -i kernel || echo "no kernelsu yet"
           curl -fsSL https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh | bash -s susfs-main || true
           if [ ! -d drivers/kernelsu ]; then
             echo "kernelsu dir not found, trying fallback"
             git clone --depth=1 https://github.com/tiann/KernelSU.git /tmp/ksu || true
             if [ -d /tmp/ksu/kernel ]; then cp -r /tmp/ksu/kernel drivers/kernelsu; fi
           fi
-          echo "=== after setup ==="
+          echo "=== kernelsu dir check ==="
           ls -la drivers/kernelsu/ 2>/dev/null || echo "still missing"
-          echo "=== drivers/Makefile tail ==="
-          tail -20 drivers/Makefile 2>/dev/null
-          echo "=== drivers/Kconfig grep kernelsu ==="
-          grep -n -i kernelsu drivers/Kconfig 2>/dev/null || echo "no kernelsu in Kconfig"
 
-      - name: Fix KernelSU MODULE_IMPORT_NS
+      - name: Fix KernelSU compat for 4.19
         working-directory: kernel
         run: |
-          echo "=== source files with MODULE_IMPORT_NS ==="
-          grep -rln "MODULE_IMPORT_NS" drivers/kernelsu/ 2>/dev/null || echo "no hits in source"
+          echo "=== Fix MODULE_IMPORT_NS (source) ==="
+          grep -rln "MODULE_IMPORT_NS" drivers/kernelsu/ 2>/dev/null || echo "no hits"
           find drivers/kernelsu -type f \( -name '*.c' -o -name '*.h' \) -print0 2>/dev/null | xargs -0 -r sed -i '/MODULE_IMPORT_NS/d'
-          echo "=== after source sed ==="
-          grep -rn "MODULE_IMPORT_NS" drivers/kernelsu/ 2>/dev/null || echo "source clean"
-
+          echo "=== Fix MODULE_IMPORT_NS (header fallback) ==="
           if ! grep -q "MODULE_IMPORT_NS_COMPAT_4_19" include/linux/module.h; then
             echo "" >> include/linux/module.h
             echo "/* compat for 4.19: MODULE_IMPORT_NS is a 5.10+ macro */" >> include/linux/module.h
@@ -124,8 +116,29 @@ jobs:
             echo "#define MODULE_IMPORT_NS_COMPAT_4_19 1" >> include/linux/module.h
             echo "#endif" >> include/linux/module.h
           fi
-          echo "=== header check ==="
-          tail -8 include/linux/module.h
+          tail -6 include/linux/module.h
+
+          echo "=== Fix file_wrapper.c for 4.19 ==="
+          FW=drivers/kernelsu/infra/file_wrapper.c
+          if [ -f "$FW" ]; then
+            cp "$FW" "$FW.orig"
+
+            sed -i 's|return orig->f_op->iopoll(kiocb, spin);|return 0; /* 4.19 compat */|g' "$FW"
+            sed -i 's|p->ops.iopoll = fp->f_op->iopoll ? ksu_wrapper_iopoll : NULL;|/* 4.19 compat: iopoll disabled */|g' "$FW"
+
+            sed -i 's|if (remap_flags & REMAP_FILE_DEDUP) {|if (0) { /* 4.19 compat: REMAP_FILE_DEDUP disabled */|g' "$FW"
+            sed -i 's|return orig->f_op->remap_file_range(file_in, pos_in, orig, pos_out, len, remap_flags);|return -EINVAL; /* 4.19 compat */|g' "$FW"
+            sed -i 's|return orig->f_op->remap_file_range(orig, pos_in, file_out, pos_out, len, remap_flags);|return -EINVAL; /* 4.19 compat */|g' "$FW"
+            sed -i 's|p->ops.remap_file_range = fp->f_op->remap_file_range ? ksu_wrapper_remap_file_range : NULL;|/* 4.19 compat: remap_file_range disabled */|g' "$FW"
+
+            echo "=== diff after patch ==="
+            diff -u "$FW.orig" "$FW" | head -80 || true
+          else
+            echo "file_wrapper.c not found, skip"
+          fi
+
+          echo "=== grep remaining 4.19-incompatible symbols ==="
+          grep -n "iopoll\|remap_file_range\|REMAP_FILE_DEDUP" "$FW" 2>/dev/null || echo "clean"
 
       - name: Patch version strings
         working-directory: kernel

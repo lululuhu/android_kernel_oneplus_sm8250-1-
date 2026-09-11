@@ -35,12 +35,9 @@ jobs:
       - name: Verify 5.10 BPF present
         working-directory: kernel
         run: |
-          echo "=== kernel/bpf dir ==="
-          ls -la kernel/bpf/ || true
           for f in ringbuf.c trampoline.c btf.c bpf_iter.c local_storage.c bpf_lsm.c; do
             if [ -f "kernel/bpf/$f" ]; then echo "OK      kernel/bpf/$f"; else echo "MISSING kernel/bpf/$f"; fi
           done
-          echo "=== security/bpf ==="
           ls -la security/bpf/ 2>/dev/null || echo "MISSING security/bpf/"
 
       - name: Setup ccache
@@ -94,51 +91,42 @@ jobs:
         run: |
           curl -fsSL https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh | bash -s susfs-main || true
           if [ ! -d drivers/kernelsu ]; then
-            echo "kernelsu dir not found, trying fallback"
             git clone --depth=1 https://github.com/tiann/KernelSU.git /tmp/ksu || true
             if [ -d /tmp/ksu/kernel ]; then cp -r /tmp/ksu/kernel drivers/kernelsu; fi
           fi
-          echo "=== kernelsu dir check ==="
           ls -la drivers/kernelsu/ 2>/dev/null || echo "still missing"
 
       - name: Fix KernelSU compat for 4.19
         working-directory: kernel
         run: |
-          echo "=== Fix MODULE_IMPORT_NS (source) ==="
-          grep -rln "MODULE_IMPORT_NS" drivers/kernelsu/ 2>/dev/null || echo "no hits"
+          echo "=== MODULE_IMPORT_NS (source) ==="
           find drivers/kernelsu -type f \( -name '*.c' -o -name '*.h' \) -print0 2>/dev/null | xargs -0 -r sed -i '/MODULE_IMPORT_NS/d'
-          echo "=== Fix MODULE_IMPORT_NS (header fallback) ==="
-          if ! grep -q "MODULE_IMPORT_NS_COMPAT_4_19" include/linux/module.h; then
-            echo "" >> include/linux/module.h
-            echo "/* compat for 4.19: MODULE_IMPORT_NS is a 5.10+ macro */" >> include/linux/module.h
-            echo "#ifndef MODULE_IMPORT_NS" >> include/linux/module.h
-            echo "#define MODULE_IMPORT_NS(x)" >> include/linux/module.h
-            echo "#define MODULE_IMPORT_NS_COMPAT_4_19 1" >> include/linux/module.h
-            echo "#endif" >> include/linux/module.h
-          fi
-          tail -6 include/linux/module.h
 
-          echo "=== Fix file_wrapper.c for 4.19 ==="
+          echo "=== MODULE_IMPORT_NS (header fallback) ==="
+          if ! grep -q "MODULE_IMPORT_NS_COMPAT_4_19" include/linux/module.h; then
+            printf '\n/* 4.19 compat */\n#ifndef MODULE_IMPORT_NS\n#define MODULE_IMPORT_NS(x)\n#define MODULE_IMPORT_NS_COMPAT_4_19 1\n#endif\n' >> include/linux/module.h
+          fi
+
+          echo "=== Fix file_wrapper.c ==="
           FW=drivers/kernelsu/infra/file_wrapper.c
           if [ -f "$FW" ]; then
             cp "$FW" "$FW.orig"
 
-            sed -i 's|return orig->f_op->iopoll(kiocb, spin);|return 0; /* 4.19 compat */|g' "$FW"
-            sed -i 's|p->ops.iopoll = fp->f_op->iopoll ? ksu_wrapper_iopoll : NULL;|/* 4.19 compat: iopoll disabled */|g' "$FW"
+            sed -i 's|return orig->f_op->iopoll(kiocb, spin);|return 0;|g' "$FW"
+            sed -i 's|p->ops.iopoll = fp->f_op->iopoll ? ksu_wrapper_iopoll : NULL;|/* iopoll disabled on 4.19 */|g' "$FW"
+            sed -i 's|if (remap_flags & REMAP_FILE_DEDUP) {|if (0) {|g' "$FW"
+            sed -i 's|return orig->f_op->remap_file_range(file_in, pos_in, orig, pos_out, len, remap_flags);|return -EINVAL;|g' "$FW"
+            sed -i 's|return orig->f_op->remap_file_range(orig, pos_in, file_out, pos_out, len, remap_flags);|return -EINVAL;|g' "$FW"
+            sed -i 's|p->ops.remap_file_range = fp->f_op->remap_file_range ? ksu_wrapper_remap_file_range : NULL;|/* remap_file_range disabled on 4.19 */|g' "$FW"
 
-            sed -i 's|if (remap_flags & REMAP_FILE_DEDUP) {|if (0) { /* 4.19 compat: REMAP_FILE_DEDUP disabled */|g' "$FW"
-            sed -i 's|return orig->f_op->remap_file_range(file_in, pos_in, orig, pos_out, len, remap_flags);|return -EINVAL; /* 4.19 compat */|g' "$FW"
-            sed -i 's|return orig->f_op->remap_file_range(orig, pos_in, file_out, pos_out, len, remap_flags);|return -EINVAL; /* 4.19 compat */|g' "$FW"
-            sed -i 's|p->ops.remap_file_range = fp->f_op->remap_file_range ? ksu_wrapper_remap_file_range : NULL;|/* 4.19 compat: remap_file_range disabled */|g' "$FW"
+            sed -i 's|struct file \*orig = data->orig;|struct file *orig __attribute__((unused)) = data->orig;|g' "$FW"
 
-            echo "=== diff after patch ==="
-            diff -u "$FW.orig" "$FW" | head -80 || true
-          else
-            echo "file_wrapper.c not found, skip"
+            echo "=== diff ==="
+            diff -u "$FW.orig" "$FW" | head -60 || true
           fi
 
-          echo "=== grep remaining 4.19-incompatible symbols ==="
-          grep -n "iopoll\|remap_file_range\|REMAP_FILE_DEDUP" "$FW" 2>/dev/null || echo "clean"
+          echo "=== remaining 4.19-incompatible symbols ==="
+          grep -n "iopoll\|remap_file_range\|REMAP_FILE_DEDUP\|MODULE_IMPORT_NS" "$FW" 2>/dev/null || echo "clean"
 
       - name: Patch version strings
         working-directory: kernel
@@ -178,7 +166,6 @@ jobs:
           scripts/config --file "${OUT_DIR}/.config" -d BPF_PRELOAD
           scripts/config --file "${OUT_DIR}/.config" --set-val FRAME_WARN 0
           make O="${OUT_DIR}" ARCH=${ARCH} CC=clang olddefconfig
-          echo "=== config check ==="
           grep -E "CONFIG_(BPF|BPF_SYSCALL|BPF_JIT|BPF_LSM|DEBUG_INFO_BTF|BPF_PRELOAD)=" "${OUT_DIR}/.config" || true
           mkdir -p "${OUT_DIR}/kernel/bpf/preload"
           touch kernel/bpf/preload/bpf_preload_umd 2>/dev/null || true
@@ -198,6 +185,7 @@ jobs:
             CC="ccache clang" CLANG_TRIPLE=aarch64-linux-gnu- \
             CROSS_COMPILE="${TOOLCHAINS_DIR}/gcc-arm64/bin/aarch64-linux-android-" \
             CROSS_COMPILE_ARM32="${TOOLCHAINS_DIR}/gcc-arm32/bin/arm-linux-androideabi-" \
+            KCFLAGS="-Wno-unused-variable -Wno-unused-but-set-variable" \
             2>&1 | tee build.log
           ccache -s || true
 
@@ -211,8 +199,6 @@ jobs:
           grep -q "^device.name1=" ak3/anykernel.sh || echo "device.name1=lemonades" >> ak3/anykernel.sh
           grep -q "^device.name2=" ak3/anykernel.sh || echo "device.name2=OnePlus 9R" >> ak3/anykernel.sh
           grep -q "^device.name3=" ak3/anykernel.sh || echo "device.name3=OnePlus9R" >> ak3/anykernel.sh
-          echo "=== device lines ==="
-          grep "^device.name" ak3/anykernel.sh
           B="${OUT_DIR}/arch/arm64/boot"
           if [ -f "$B/Image.gz-dtb" ]; then cp "$B/Image.gz-dtb" ak3/
           elif [ -f "$B/Image.gz" ]; then cp "$B/Image.gz" ak3/

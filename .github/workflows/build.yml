@@ -18,6 +18,7 @@ jobs:
       ARCH: arm64
       TOOLCHAINS_DIR: ${{ github.workspace }}/toolchains
       OUT_DIR: ${{ github.workspace }}/kernel/out
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
       ZIP_PREFIX: Oblivionis
     steps:
       - name: Free disk
@@ -39,11 +40,13 @@ jobs:
             if [ -f "bpf/$f" ]; then echo "OK      kernel/bpf/$f"; else echo "MISSING kernel/bpf/$f"; fi
           done
           ls -la security/bpf/ 2>/dev/null || echo "MISSING security/bpf/"
+          echo "=== patches dir ==="
+          ls -la patches/ 2>/dev/null || echo "no patches dir"
 
       - name: Setup ccache
         uses: actions/cache@v4
         with:
-          path: ~/.ccache
+          path: ${{ github.workspace }}/.ccache
           key: ${{ runner.os }}-ccache-${{ github.ref }}-${{ github.sha }}
           restore-keys: |
             ${{ runner.os }}-ccache-${{ github.ref }}-
@@ -75,7 +78,7 @@ jobs:
           git config user.email ci@local
           git config user.name CI
           shopt -s nullglob
-          P=(../patches/*.patch)
+          P=(patches/*.patch)
           if [ ${#P[@]} -eq 0 ]; then echo "no patches"; exit 0; fi
           for p in "${P[@]}"; do
             echo "applying $p"
@@ -118,8 +121,6 @@ jobs:
             sed -i 's|return orig->f_op->remap_file_range(orig, pos_in, file_out, pos_out, len, remap_flags);|return -EINVAL;|g' "$FW"
             sed -i 's|p->ops.remap_file_range = fp->f_op->remap_file_range ? ksu_wrapper_remap_file_range : NULL;|/* remap_file_range disabled on 4.19 */|g' "$FW"
             sed -i 's|struct file \*orig = data->orig;|struct file *orig __attribute__((unused)) = data->orig;|g' "$FW"
-            echo "--- diff ---"
-            diff -u "$FW.orig" "$FW" | head -60 || true
           fi
 
           echo "=== Fix seccomp_cache.c ==="
@@ -134,25 +135,65 @@ jobs:
               echo "#endif"
               cat "$SC.orig"
             } > "$SC"
-            echo "--- diff ---"
-            diff -u "$SC.orig" "$SC" | head -30 || true
           fi
 
-          echo "=== Fix pkg_observer / other 5.x-only symbols (best-effort) ==="
-          # 加一些常见缺失宏的兼容定义，作为保底
-          grep -rln "SECCOMP_ARCH_NATIVE_NR" drivers/kernelsu/ 2>/dev/null | while read f; do
-            if ! grep -q "SECCOMP_ARCH_NATIVE_NR 512" "$f"; then
-              {
-                echo "#ifndef SECCOMP_ARCH_NATIVE_NR"
-                echo "#define SECCOMP_ARCH_NATIVE_NR 512"
-                echo "#endif"
-                cat "$f"
-              } > "$f.tmp" && mv "$f.tmp" "$f"
-            fi
-          done
+          echo "=== Create uapi/linux/mount.h shim for 4.19 ==="
+          mkdir -p include/uapi/linux
+          if [ ! -f include/uapi/linux/mount.h ] || ! grep -q "4.19 shim" include/uapi/linux/mount.h 2>/dev/null; then
+            cat > include/uapi/linux/mount.h <<'MOUNT_SHIM'
+/* 4.19 shim: uapi/linux/mount.h was split from uapi/linux/fs.h in 5.2 */
+#ifndef _UAPI_LINUX_MOUNT_H
+#define _UAPI_LINUX_MOUNT_H
+
+#include <linux/types.h>
+#include <uapi/linux/fs.h>
+
+/* 4.19 lacks these 5.x mount flags, define no-ops for compat */
+#ifndef MS_NOSYMFOLLOW
+#define MS_NOSYMFOLLOW 256
+#endif
+#ifndef MOUNT_ATTR_RDONLY
+#define MOUNT_ATTR_RDONLY 0x00000001
+#endif
+#ifndef MOUNT_ATTR_NOSUID
+#define MOUNT_ATTR_NOSUID 0x00000002
+#endif
+#ifndef MOUNT_ATTR_NODEV
+#define MOUNT_ATTR_NODEV  0x00000004
+#endif
+#ifndef MOUNT_ATTR_NOEXEC
+#define MOUNT_ATTR_NOEXEC 0x00000008
+#endif
+#ifndef MOUNT_ATTR__ATIME
+#define MOUNT_ATTR__ATIME 0x00000070
+#endif
+#ifndef MOUNT_ATTR_RELATIME
+#define MOUNT_ATTR_RELATIME 0x00000000
+#endif
+#ifndef MOUNT_ATTR_NOATIME
+#define MOUNT_ATTR_NOATIME  0x00000010
+#endif
+#ifndef MOUNT_ATTR_STRICTATIME
+#define MOUNT_ATTR_STRICTATIME 0x00000020
+#endif
+#ifndef MOUNT_ATTR_NODIRATIME
+#define MOUNT_ATTR_NODIRATIME  0x00000080
+#endif
+#ifndef MOUNT_ATTR_IDMAP
+#define MOUNT_ATTR_IDMAP  0x00100000
+#endif
+#ifndef MOUNT_ATTR_NOSYMFOLLOW
+#define MOUNT_ATTR_NOSYMFOLLOW 0x00200000
+#endif
+
+#endif /* _UAPI_LINUX_MOUNT_H */
+MOUNT_SHIM
+            echo "created shim: include/uapi/linux/mount.h"
+          fi
+          ls -la include/uapi/linux/mount.h
 
           echo "=== remaining problematic symbols ==="
-          grep -rn "SECCOMP_ARCH_NATIVE_NR\|MODULE_IMPORT_NS\|remap_file_range\|->iopoll" drivers/kernelsu/ 2>/dev/null | grep -v "512\|disabled" || echo "clean"
+          grep -rn "SECCOMP_ARCH_NATIVE_NR\|MODULE_IMPORT_NS\|->iopoll" drivers/kernelsu/ 2>/dev/null | grep -v "512\|disabled" || echo "clean"
 
       - name: Patch version strings
         working-directory: kernel
@@ -198,11 +239,11 @@ jobs:
       - name: Build kernel
         working-directory: kernel
         env:
-          CCACHE_DIR: ~/.ccache
           CCACHE_MAXSIZE: 5G
           CCACHE_COMPRESS: "1"
         run: |
           export PATH="${TOOLCHAINS_DIR}/clang/bin:$PATH"
+          mkdir -p "${CCACHE_DIR}"
           ccache -s || true
           set -o pipefail
           make -j$(nproc) O="${OUT_DIR}" ARCH=${ARCH} \

@@ -1,4 +1,4 @@
-name: Build Oblivionis Kernel
+name: Build Oblivionis Kernel (no KernelSU)
 
 on:
   workflow_dispatch:
@@ -86,121 +86,6 @@ jobs:
             fi
           done
 
-      - name: Integrate SukiSU-Ultra (susfs-main)
-        working-directory: kernel
-        continue-on-error: true
-        run: |
-          curl -fsSL https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh | bash -s susfs-main || true
-          if [ ! -d drivers/kernelsu ]; then
-            git clone --depth=1 https://github.com/SukiSU-Ultra/SukiSU-Ultra.git /tmp/ksu || true
-            if [ -d /tmp/ksu/kernel ]; then cp -r /tmp/ksu/kernel drivers/kernelsu; fi
-          fi
-          ls -la drivers/kernelsu/ 2>/dev/null || echo "still missing"
-
-      - name: Fix KernelSU compat for 4.19
-        working-directory: kernel
-        run: |
-          echo "=== MODULE_IMPORT_NS (source) ==="
-          find drivers/kernelsu -type f \( -name '*.c' -o -name '*.h' \) -print0 2>/dev/null | xargs -0 -r sed -i '/MODULE_IMPORT_NS/d' || true
-
-          echo "=== MODULE_IMPORT_NS (header fallback) ==="
-          if ! grep -q "MODULE_IMPORT_NS_COMPAT_4_19" include/linux/module.h; then
-            printf '\n/* 4.19 compat */\n#ifndef MODULE_IMPORT_NS\n#define MODULE_IMPORT_NS(x)\n#define MODULE_IMPORT_NS_COMPAT_4_19 1\n#endif\n' >> include/linux/module.h
-          fi
-
-          echo "=== Fix file_wrapper.c ==="
-          FW=drivers/kernelsu/infra/file_wrapper.c
-          if [ -f "$FW" ]; then
-            cp "$FW" "$FW.orig"
-            sed -i 's|return orig->f_op->iopoll(kiocb, spin);|return 0;|g' "$FW"
-            sed -i 's|p->ops.iopoll = fp->f_op->iopoll ? ksu_wrapper_iopoll : NULL;|/* iopoll disabled on 4.19 */|g' "$FW"
-            sed -i 's|if (remap_flags & REMAP_FILE_DEDUP) {|if (0) {|g' "$FW"
-            sed -i 's|return orig->f_op->remap_file_range(file_in, pos_in, orig, pos_out, len, remap_flags);|return -EINVAL;|g' "$FW"
-            sed -i 's|return orig->f_op->remap_file_range(orig, pos_in, file_out, pos_out, len, remap_flags);|return -EINVAL;|g' "$FW"
-            sed -i 's|p->ops.remap_file_range = fp->f_op->remap_file_range ? ksu_wrapper_remap_file_range : NULL;|/* remap_file_range disabled on 4.19 */|g' "$FW"
-            sed -i 's|struct file \*orig = data->orig;|struct file *orig __attribute__((unused)) = data->orig;|g' "$FW"
-          fi
-
-          echo "=== Fix seccomp_cache.c ==="
-          SC=drivers/kernelsu/infra/seccomp_cache.c
-          if [ -f "$SC" ] && ! grep -q "SECCOMP_ARCH_NATIVE_NR_COMPAT" "$SC"; then
-            cp "$SC" "$SC.orig"
-            printf '/* 4.19 compat */\n#ifndef SECCOMP_ARCH_NATIVE_NR\n#define SECCOMP_ARCH_NATIVE_NR 512\n#define SECCOMP_ARCH_NATIVE_NR_COMPAT 1\n#endif\n' > /tmp/sc_head
-            cat /tmp/sc_head "$SC.orig" > "$SC"
-            echo "patched: $SC"
-          fi
-
-          echo "=== Fix ALL allowlist.c files (explicit paths) ==="
-          for AL in drivers/kernelsu/allowlist.c drivers/kernelsu/policy/allowlist.c; do
-            if [ ! -f "$AL" ]; then
-              echo "not found: $AL"
-              continue
-            fi
-            if grep -q "TWA_RESUME_COMPAT_4_19" "$AL"; then
-              echo "already patched: $AL"
-              continue
-            fi
-            cp "$AL" "$AL.orig"
-            printf '/* 4.19 compat: TWA_RESUME (enum->bool) + put_task_struct */\n#include <linux/sched/task.h>\n#ifndef TWA_RESUME\n#define TWA_RESUME true\n#define TWA_RESUME_COMPAT_4_19 1\n#endif\n' > /tmp/al_head
-            cat /tmp/al_head "$AL.orig" > "$AL"
-            echo "patched: $AL"
-          done
-
-          echo "=== Fix pkg_observer.c ==="
-          PO=drivers/kernelsu/manager/pkg_observer.c
-          if [ -f "$PO" ]; then
-            cp "$PO" "$PO.orig"
-            sed -i 's|\.handle_inode_event = ksu_handle_inode_event,|/* .handle_inode_event removed for 4.19 compat */|' "$PO"
-            sed -i 's|int ksu_handle_inode_event(|int __attribute__((unused)) ksu_handle_inode_event(|' "$PO"
-            echo "patched: $PO"
-          fi
-
-          echo "=== Create uapi/linux/mount.h shim ==="
-          mkdir -p include/uapi/linux
-          if [ ! -f include/uapi/linux/mount.h ]; then
-            echo '/* 4.19 shim */' > include/uapi/linux/mount.h
-            echo '#ifndef _UAPI_LINUX_MOUNT_H' >> include/uapi/linux/mount.h
-            echo '#define _UAPI_LINUX_MOUNT_H' >> include/uapi/linux/mount.h
-            echo '#include <linux/types.h>' >> include/uapi/linux/mount.h
-            echo '#include <uapi/linux/fs.h>' >> include/uapi/linux/mount.h
-            echo '#ifndef MS_NOSYMFOLLOW' >> include/uapi/linux/mount.h
-            echo '#define MS_NOSYMFOLLOW 256' >> include/uapi/linux/mount.h
-            echo '#endif' >> include/uapi/linux/mount.h
-            echo '#ifndef MOUNT_ATTR_RDONLY' >> include/uapi/linux/mount.h
-            echo '#define MOUNT_ATTR_RDONLY 0x00000001' >> include/uapi/linux/mount.h
-            echo '#endif' >> include/uapi/linux/mount.h
-            echo '#ifndef MOUNT_ATTR_NOSUID' >> include/uapi/linux/mount.h
-            echo '#define MOUNT_ATTR_NOSUID 0x00000002' >> include/uapi/linux/mount.h
-            echo '#endif' >> include/uapi/linux/mount.h
-            echo '#ifndef MOUNT_ATTR_NODEV' >> include/uapi/linux/mount.h
-            echo '#define MOUNT_ATTR_NODEV 0x00000004' >> include/uapi/linux/mount.h
-            echo '#endif' >> include/uapi/linux/mount.h
-            echo '#ifndef MOUNT_ATTR_NOEXEC' >> include/uapi/linux/mount.h
-            echo '#define MOUNT_ATTR_NOEXEC 0x00000008' >> include/uapi/linux/mount.h
-            echo '#endif' >> include/uapi/linux/mount.h
-            echo '#ifndef MOUNT_ATTR_NOATIME' >> include/uapi/linux/mount.h
-            echo '#define MOUNT_ATTR_NOATIME 0x00000010' >> include/uapi/linux/mount.h
-            echo '#endif' >> include/uapi/linux/mount.h
-            echo '#ifndef MOUNT_ATTR_STRICTATIME' >> include/uapi/linux/mount.h
-            echo '#define MOUNT_ATTR_STRICTATIME 0x00000020' >> include/uapi/linux/mount.h
-            echo '#endif' >> include/uapi/linux/mount.h
-            echo '#ifndef MOUNT_ATTR_RELATIME' >> include/uapi/linux/mount.h
-            echo '#define MOUNT_ATTR_RELATIME 0x00000000' >> include/uapi/linux/mount.h
-            echo '#endif' >> include/uapi/linux/mount.h
-            echo '#ifndef MOUNT_ATTR_NODIRATIME' >> include/uapi/linux/mount.h
-            echo '#define MOUNT_ATTR_NODIRATIME 0x00000080' >> include/uapi/linux/mount.h
-            echo '#endif' >> include/uapi/linux/mount.h
-            echo '#ifndef MOUNT_ATTR__ATIME' >> include/uapi/linux/mount.h
-            echo '#define MOUNT_ATTR__ATIME 0x00000070' >> include/uapi/linux/mount.h
-            echo '#endif' >> include/uapi/linux/mount.h
-            echo '#endif' >> include/uapi/linux/mount.h
-          fi
-
-          echo "=== VERIFY: files containing TWA_RESUME ==="
-          grep -rl "TWA_RESUME" drivers/kernelsu/ 2>/dev/null || echo "none"
-          echo "=== VERIFY: compat macro present? ==="
-          grep -rl "TWA_RESUME_COMPAT_4_19" drivers/kernelsu/ 2>/dev/null || echo "none"
-
       - name: Patch version strings
         working-directory: kernel
         env:
@@ -237,6 +122,7 @@ jobs:
             -e DEBUG_INFO -e DEBUG_INFO_DWARF4
           scripts/config --file "${OUT_DIR}/.config" -d DEBUG_INFO_BTF_MODULES
           scripts/config --file "${OUT_DIR}/.config" -d BPF_PRELOAD
+          scripts/config --file "${OUT_DIR}/.config" -d KSU
           scripts/config --file "${OUT_DIR}/.config" --set-val FRAME_WARN 0
           make O="${OUT_DIR}" ARCH=${ARCH} CC=clang olddefconfig
           echo "=== config check ==="
@@ -276,7 +162,7 @@ jobs:
           elif [ -f "$B/Image" ]; then cp "$B/Image" ak3/
           else echo "::error::no Image found"; exit 1; fi
           cd ak3
-          ZIP="${ZIP_PREFIX}-4.19-lemonades-$(date +%Y%m%d-%H%M).zip"
+          ZIP="${ZIP_PREFIX}-4.19-lemonades-noroot-$(date +%Y%m%d-%H%M).zip"
           zip -r9 "../$ZIP" . -x ".git/*"
           echo "ZIP=$ZIP" >> $GITHUB_ENV
 

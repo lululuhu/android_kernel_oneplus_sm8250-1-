@@ -19,7 +19,6 @@ jobs:
       TOOLCHAINS_DIR: ${{ github.workspace }}/toolchains
       OUT_DIR: ${{ github.workspace }}/kernel/out
       CCACHE_DIR: ${{ github.workspace }}/.ccache
-      ZIP_PREFIX: Oblivionis
     steps:
       - name: Free disk
         run: |
@@ -76,11 +75,9 @@ jobs:
         run: |
           mkdir -p "${GITHUB_WORKSPACE}/magiskboot_bin"
           cd "${GITHUB_WORKSPACE}/magiskboot_bin"
-          curl -fL "https://raw.githubusercontent.com/miaizhe/magiskboot-linux/main/x86_64/magiskboot" -o magiskboot || {
-            echo "::warning::failed to download magiskboot, will skip img packing"
-          }
-          chmod +x magiskboot || true
-          ./magiskboot 2>&1 | head -5 || echo "magiskboot download failed"
+          curl -fL "https://raw.githubusercontent.com/miaizhe/magiskboot-linux/main/x86_64/magiskboot" -o magiskboot
+          chmod +x magiskboot
+          ./magiskboot 2>&1 | head -5 || true
 
       - name: Apply patches
         working-directory: kernel
@@ -161,17 +158,14 @@ jobs:
         run: |
           set -e
           MB="${GITHUB_WORKSPACE}/magiskboot_bin/magiskboot"
-          if [ ! -x "$MB" ]; then
-            echo "::warning::magiskboot not available, skipping img packing"
-            exit 0
-          fi
-
           BOOT_DIR="${GITHUB_WORKSPACE}/boot_pack"
           mkdir -p "$BOOT_DIR"
           cd "$BOOT_DIR"
           cp "${GITHUB_WORKSPACE}/kernel/bootimg/boot_base.img" boot_origin.img
 
+          echo "=== unpack original boot ==="
           "$MB" unpack boot_origin.img
+          ls -la
 
           KERNEL_IMG="${GITHUB_WORKSPACE}/kernel/out/arch/arm64/boot/Image.gz-dtb"
           if [ ! -f "$KERNEL_IMG" ]; then
@@ -180,76 +174,32 @@ jobs:
           if [ ! -f "$KERNEL_IMG" ]; then
             KERNEL_IMG="${GITHUB_WORKSPACE}/kernel/out/arch/arm64/boot/Image"
           fi
-          echo "using kernel: $KERNEL_IMG"
+          echo "=== using kernel: $KERNEL_IMG ==="
           ls -la "$KERNEL_IMG"
 
-          # 原 kernel 是什么格式
+          echo "=== original kernel format ==="
           file kernel
-          # 替换
-          cp "$KERNEL_IMG" kernel.new
-          # 如果格式不同（原 kernel 可能是 lz4 / gzip），做转换
+
+          echo "=== replacing kernel ==="
           case "$(file -b kernel)" in
             *gzip*) gzip -c "$KERNEL_IMG" > kernel.new ;;
-            *LZ4*) lz4 -l -12 "$KERNEL_IMG" kernel.new 2>/dev/null || cp "$KERNEL_IMG" kernel.new ;;
+            *LZ4*) lz4 -l -12 "$KERNEL_IMG" kernel.new ;;
             *) cp "$KERNEL_IMG" kernel.new ;;
           esac
           mv kernel.new kernel
 
-          "$MB" repack boot_origin.img "${GITHUB_WORKSPACE}/Oblivionis-4.19-lemonades-$(date +%Y%m%d-%H%M).img"
-          ls -la "${GITHUB_WORKSPACE}"/Oblivionis-*.img
+          echo "=== repack ==="
+          ZIP_NAME="Oblivionis-4.19-lemonades-$(date +%Y%m%d-%H%M).img"
+          "$MB" repack boot_origin.img "${GITHUB_WORKSPACE}/$ZIP_NAME"
+          ls -la "${GITHUB_WORKSPACE}"/*.img
+          echo "OUTPUT_IMG=$ZIP_NAME" >> $GITHUB_ENV
 
-      - name: Package with AnyKernel3 (backup)
-        if: success()
-        run: |
-          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git ak3
-          printf '### AnyKernel3 Ramdisk Mod Script\n' > ak3/anykernel.sh
-          printf '## osm0sis @ xda-developers\n\n' >> ak3/anykernel.sh
-          printf "properties() { '\n" >> ak3/anykernel.sh
-          printf 'kernel.string=Oblivionis Kernel (4.19.325)\n' >> ak3/anykernel.sh
-          printf 'do.devicecheck=1\n' >> ak3/anykernel.sh
-          printf 'do.modules=0\n' >> ak3/anykernel.sh
-          printf 'do.systemless=1\n' >> ak3/anykernel.sh
-          printf 'do.cleanup=1\n' >> ak3/anykernel.sh
-          printf 'do.cleanuponabort=0\n' >> ak3/anykernel.sh
-          printf 'device.name1=lemonades\n' >> ak3/anykernel.sh
-          printf 'device.name2=OnePlus 9R\n' >> ak3/anykernel.sh
-          printf 'device.name3=OnePlus9R\n' >> ak3/anykernel.sh
-          printf 'device.name4=\n' >> ak3/anykernel.sh
-          printf 'device.name5=\n' >> ak3/anykernel.sh
-          printf 'supported.versions=\n' >> ak3/anykernel.sh
-          printf 'supported.patchlevels=\n' >> ak3/anykernel.sh
-          printf 'supported.vendorpatchlevels=\n' >> ak3/anykernel.sh
-          printf "'; }\n\n" >> ak3/anykernel.sh
-          printf 'boot_attributes() {\n' >> ak3/anykernel.sh
-          printf 'set_perm_recursive 0 0 755 644 $RAMDISK/*;\n' >> ak3/anykernel.sh
-          printf 'set_perm_recursive 0 0 750 750 $RAMDISK/init* $RAMDISK/sbin;\n' >> ak3/anykernel.sh
-          printf '}\n\n' >> ak3/anykernel.sh
-          printf 'BLOCK=boot;\n' >> ak3/anykernel.sh
-          printf 'IS_SLOT_DEVICE=0;\n' >> ak3/anykernel.sh
-          printf 'RAMDISK_COMPRESSION=auto;\n' >> ak3/anykernel.sh
-          printf 'PATCH_VBMETA_FLAG=auto;\n\n' >> ak3/anykernel.sh
-          printf '. tools/ak3-core.sh;\n\n' >> ak3/anykernel.sh
-          printf 'dump_boot;\n' >> ak3/anykernel.sh
-          printf 'write_boot;\n' >> ak3/anykernel.sh
-
-          B="${OUT_DIR}/arch/arm64/boot"
-          if [ -f "$B/Image.gz-dtb" ]; then cp "$B/Image.gz-dtb" ak3/
-          elif [ -f "$B/Image.gz" ]; then cp "$B/Image.gz" ak3/
-          elif [ -f "$B/Image" ]; then cp "$B/Image" ak3/
-          else echo "::error::no Image"; exit 1; fi
-          cd ak3
-          ZIP="Oblivionis-4.19-lemonades-$(date +%Y%m%d-%H%M).zip"
-          zip -r9 "../$ZIP" . -x ".git/*"
-          echo "ZIP=$ZIP" >> $GITHUB_ENV
-
-      - name: Upload artifacts
+      - name: Upload boot image
         if: success()
         uses: actions/upload-artifact@v4
         with:
           name: Oblivionis-${{ github.run_number }}
-          path: |
-            Oblivionis-4.19-lemonades-*.img
-            Oblivionis-4.19-lemonades-*.zip
+          path: ${{ env.OUTPUT_IMG }}
           retention-days: 30
 
       - name: Upload build log

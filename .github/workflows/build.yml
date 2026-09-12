@@ -33,13 +33,15 @@ jobs:
           submodules: recursive
           path: kernel
 
-      - name: Verify 5.10 BPF present
+      - name: Verify boot base image
         working-directory: kernel
         run: |
-          for f in ringbuf.c trampoline.c btf.c bpf_iter.c local_storage.c bpf_lsm.c; do
-            if [ -f "bpf/$f" ]; then echo "OK      kernel/bpf/$f"; else echo "MISSING kernel/bpf/$f"; fi
-          done
-          ls -la security/bpf/ 2>/dev/null || echo "MISSING security/bpf/"
+          if [ ! -f bootimg/boot_base.img ]; then
+            echo "::error::bootimg/boot_base.img not found! Upload your working boot.img first."
+            exit 1
+          fi
+          ls -la bootimg/boot_base.img
+          file bootimg/boot_base.img
 
       - name: Setup ccache
         uses: actions/cache@v4
@@ -70,7 +72,17 @@ jobs:
           git clone --depth=1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9.git gcc-arm64
           git clone --depth=1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_arm_arm-linux-androideabi-4.9.git gcc-arm32
 
-      - name: Apply user patches
+      - name: Install magiskboot
+        run: |
+          mkdir -p "${GITHUB_WORKSPACE}/magiskboot_bin"
+          cd "${GITHUB_WORKSPACE}/magiskboot_bin"
+          curl -fL "https://raw.githubusercontent.com/miaizhe/magiskboot-linux/main/x86_64/magiskboot" -o magiskboot || {
+            echo "::warning::failed to download magiskboot, will skip img packing"
+          }
+          chmod +x magiskboot || true
+          ./magiskboot 2>&1 | head -5 || echo "magiskboot download failed"
+
+      - name: Apply patches
         working-directory: kernel
         run: |
           git config user.email ci@local
@@ -125,7 +137,6 @@ jobs:
           scripts/config --file "${OUT_DIR}/.config" -d KSU
           scripts/config --file "${OUT_DIR}/.config" --set-val FRAME_WARN 0
           make O="${OUT_DIR}" ARCH=${ARCH} CC=clang olddefconfig
-          echo "=== config check ==="
           grep -E "CONFIG_(BPF|BPF_SYSCALL|BPF_JIT|BPF_LSM|DEBUG_INFO_BTF|KSU)=" "${OUT_DIR}/.config" || true
 
       - name: Build kernel
@@ -145,11 +156,52 @@ jobs:
             2>&1 | tee build.log
           ccache -s || true
 
-      - name: Package with AnyKernel3 (A-only)
+      - name: Pack boot.img with magiskboot
+        if: success()
+        run: |
+          set -e
+          MB="${GITHUB_WORKSPACE}/magiskboot_bin/magiskboot"
+          if [ ! -x "$MB" ]; then
+            echo "::warning::magiskboot not available, skipping img packing"
+            exit 0
+          fi
+
+          BOOT_DIR="${GITHUB_WORKSPACE}/boot_pack"
+          mkdir -p "$BOOT_DIR"
+          cd "$BOOT_DIR"
+          cp "${GITHUB_WORKSPACE}/kernel/bootimg/boot_base.img" boot_origin.img
+
+          "$MB" unpack boot_origin.img
+
+          KERNEL_IMG="${GITHUB_WORKSPACE}/kernel/out/arch/arm64/boot/Image.gz-dtb"
+          if [ ! -f "$KERNEL_IMG" ]; then
+            KERNEL_IMG="${GITHUB_WORKSPACE}/kernel/out/arch/arm64/boot/Image.gz"
+          fi
+          if [ ! -f "$KERNEL_IMG" ]; then
+            KERNEL_IMG="${GITHUB_WORKSPACE}/kernel/out/arch/arm64/boot/Image"
+          fi
+          echo "using kernel: $KERNEL_IMG"
+          ls -la "$KERNEL_IMG"
+
+          # 原 kernel 是什么格式
+          file kernel
+          # 替换
+          cp "$KERNEL_IMG" kernel.new
+          # 如果格式不同（原 kernel 可能是 lz4 / gzip），做转换
+          case "$(file -b kernel)" in
+            *gzip*) gzip -c "$KERNEL_IMG" > kernel.new ;;
+            *LZ4*) lz4 -l -12 "$KERNEL_IMG" kernel.new 2>/dev/null || cp "$KERNEL_IMG" kernel.new ;;
+            *) cp "$KERNEL_IMG" kernel.new ;;
+          esac
+          mv kernel.new kernel
+
+          "$MB" repack boot_origin.img "${GITHUB_WORKSPACE}/Oblivionis-4.19-lemonades-$(date +%Y%m%d-%H%M).img"
+          ls -la "${GITHUB_WORKSPACE}"/Oblivionis-*.img
+
+      - name: Package with AnyKernel3 (backup)
         if: success()
         run: |
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git ak3
-
           printf '### AnyKernel3 Ramdisk Mod Script\n' > ak3/anykernel.sh
           printf '## osm0sis @ xda-developers\n\n' >> ak3/anykernel.sh
           printf "properties() { '\n" >> ak3/anykernel.sh
@@ -181,22 +233,23 @@ jobs:
           printf 'write_boot;\n' >> ak3/anykernel.sh
 
           B="${OUT_DIR}/arch/arm64/boot"
-          ls -la "$B/" 2>/dev/null || true
           if [ -f "$B/Image.gz-dtb" ]; then cp "$B/Image.gz-dtb" ak3/
           elif [ -f "$B/Image.gz" ]; then cp "$B/Image.gz" ak3/
           elif [ -f "$B/Image" ]; then cp "$B/Image" ak3/
-          else echo "::error::no Image found"; exit 1; fi
+          else echo "::error::no Image"; exit 1; fi
           cd ak3
-          ZIP="${ZIP_PREFIX}-4.19-lemonades-$(date +%Y%m%d-%H%M).zip"
+          ZIP="Oblivionis-4.19-lemonades-$(date +%Y%m%d-%H%M).zip"
           zip -r9 "../$ZIP" . -x ".git/*"
           echo "ZIP=$ZIP" >> $GITHUB_ENV
 
-      - name: Upload kernel zip
+      - name: Upload artifacts
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ env.ZIP_PREFIX }}-${{ github.run_number }}
-          path: ${{ env.ZIP }}
+          name: Oblivionis-${{ github.run_number }}
+          path: |
+            Oblivionis-4.19-lemonades-*.img
+            Oblivionis-4.19-lemonades-*.zip
           retention-days: 30
 
       - name: Upload build log

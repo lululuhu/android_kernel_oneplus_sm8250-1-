@@ -2,6 +2,11 @@ name: Build Oblivionis Kernel
 
 on:
   workflow_dispatch:
+    inputs:
+      base_img_url:
+        description: 'Optional URL to boot_base.img (will be downloaded into kernel/bootimg/boot_base.img)'
+        required: false
+        default: ''
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -32,15 +37,27 @@ jobs:
           submodules: recursive
           path: kernel
 
-      - name: Verify boot base image
+      - name: Fetch base image (optional URL)
+        run: |
+          if [ -n "${{ github.event.inputs.base_img_url }}" ]; then
+            mkdir -p kernel/bootimg
+            curl -fsSL "${{ github.event.inputs.base_img_url }}" -o kernel/bootimg/boot_base.img
+            echo "Downloaded base image from workflow input"
+          fi
+
+      - name: Check for boot base image
         working-directory: kernel
         run: |
-          if [ ! -f bootimg/boot_base.img ]; then
-            echo "::error::bootimg/boot_base.img not found! Upload your working boot.img first."
-            exit 1
+          if [ -f bootimg/boot_base.img ]; then
+            echo "Found boot_base.img"
+            ls -la bootimg/boot_base.img
+            file bootimg/boot_base.img
+            echo "BOOT_PRESENT=1" >> $GITHUB_ENV
+          else
+            echo "::warning::bootimg/boot_base.img not found"
+            echo "::warning::Will compile kernel only and upload raw Image.gz-dtb"
+            echo "BOOT_PRESENT=0" >> $GITHUB_ENV
           fi
-          ls -la bootimg/boot_base.img
-          file bootimg/boot_base.img
 
       - name: Setup ccache
         uses: actions/cache@v4
@@ -59,7 +76,7 @@ jobs:
             lib32ncurses5-dev lib32readline-dev lib32z1-dev liblz4-tool libncurses5 libncurses5-dev \
             libsdl1.2-dev libssl-dev libxml2 libxml2-utils lzop pngcrush rsync schedtool \
             squashfs-tools xsltproc zip unzip zlib1g-dev python3 python3-pip imagemagick \
-            cpio device-tree-compiler libelf-dev dwarves zstd
+            cpio device-tree-compiler libelf-dev dwarves zstd lz4
           sudo apt-get clean
           sudo rm -rf /var/lib/apt/lists/*
 
@@ -72,6 +89,7 @@ jobs:
           git clone --depth=1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_arm_arm-linux-androideabi-4.9.git gcc-arm32
 
       - name: Install magiskboot
+        if: ${{ env.BOOT_PRESENT == '1' }}
         run: |
           mkdir -p "${GITHUB_WORKSPACE}/magiskboot_bin"
           cd "${GITHUB_WORKSPACE}/magiskboot_bin"
@@ -153,8 +171,18 @@ jobs:
             2>&1 | tee build.log
           ccache -s || true
 
-      - name: Pack boot.img with magiskboot
+      - name: Show raw kernel artifacts
         if: success()
+        run: |
+          B="${GITHUB_WORKSPACE}/kernel/out/arch/arm64/boot"
+          ls -la "$B/"
+          echo "=== Image formats ==="
+          for f in Image Image.gz Image.gz-dtb; do
+            if [ -f "$B/$f" ]; then echo "$f:"; file "$B/$f"; fi
+          done
+
+      - name: Pack boot.img with magiskboot
+        if: ${{ env.BOOT_PRESENT == '1' && success() }}
         run: |
           set -e
           MB="${GITHUB_WORKSPACE}/magiskboot_bin/magiskboot"
@@ -189,17 +217,28 @@ jobs:
           mv kernel.new kernel
 
           echo "=== repack ==="
-          ZIP_NAME="Oblivionis-4.19-lemonades-$(date +%Y%m%d-%H%M).img"
-          "$MB" repack boot_origin.img "${GITHUB_WORKSPACE}/$ZIP_NAME"
+          IMG_NAME="Oblivionis-4.19-lemonades-$(date +%Y%m%d-%H%M).img"
+          "$MB" repack boot_origin.img "${GITHUB_WORKSPACE}/$IMG_NAME"
           ls -la "${GITHUB_WORKSPACE}"/*.img
-          echo "OUTPUT_IMG=$ZIP_NAME" >> $GITHUB_ENV
+          echo "OUTPUT_IMG=$IMG_NAME" >> $GITHUB_ENV
 
       - name: Upload boot image
-        if: success()
+        if: ${{ env.BOOT_PRESENT == '1' && success() }}
         uses: actions/upload-artifact@v4
         with:
-          name: Oblivionis-${{ github.run_number }}
+          name: Oblivionis-img-${{ github.run_number }}
           path: ${{ env.OUTPUT_IMG }}
+          retention-days: 30
+
+      - name: Upload raw kernel (fallback)
+        if: ${{ env.BOOT_PRESENT == '0' && success() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: Oblivionis-raw-${{ github.run_number }}
+          path: |
+            kernel/out/arch/arm64/boot/Image.gz-dtb
+            kernel/out/arch/arm64/boot/Image.gz
+            kernel/out/arch/arm64/boot/Image
           retention-days: 30
 
       - name: Upload build log
